@@ -1,0 +1,112 @@
+{
+  "_about": "Every number here was measured by the code in this repo on the machine described in 'environment', except entries under 'published', which are quoted from other people's papers and tools for comparison. bpb = bits per byte of the original file. Lower is better.",
+  "environment": {
+    "cpu": "20 logical cores, x86-64, no AVX-512",
+    "gpu": "Intel Iris Xe integrated (unused - all inference on CPU)",
+    "os": "Windows 11",
+    "python": "3.13.11",
+    "torch_dtype": "float32",
+    "date": "2026-07-30/31"
+  },
+
+  "published": {
+    "_source": "xz/ts_zip figures from bellard.org/ts_zip; Hutter record from prize.hutter1.net; image/audio from arXiv:2309.10668",
+    "ts_zip_rwkv169m": {"alice29.txt": 1.142, "book1": 1.431, "enwik8": 1.106, "enwik9": 1.084},
+    "xz9_reference": {"alice29.txt": 2.551, "book1": 2.717, "enwik8": 1.989, "enwik9": 1.707},
+    "fx2_cmix_hutter_record": {"enwik9_bytes": 110793128, "enwik9_bpb": 0.886},
+    "chinchilla70b_arXiv_2309_10668": {
+      "imagenet_patches_pct": 43.4, "png_pct": 58.5,
+      "librispeech_pct": 16.4, "flac_pct": 30.3
+    }
+  },
+
+  "harness_validation": {
+    "_about": "bench.py's own xz -9 measurement vs the published figure on the identical file. This is the check that makes every other number here credible.",
+    "alice29.txt": {"measured": 2.551, "published": 2.551},
+    "book1": {"measured": 2.717, "published": 2.717}
+  },
+
+  "classical_full_files": {
+    "_about": "bench.py, whole files, round-trip verified per row.",
+    "alice29.txt": {"bytes": 152089, "zlib -9": 2.849, "bz2 -9": 2.272, "xz -9": 2.551, "brotli 11": 2.445, "ptc": 2.606},
+    "book1": {"bytes": 768771, "zlib -9": 3.252, "bz2 -9": 2.420, "xz -9": 2.717, "brotli 11": 2.667, "ptc": 2.679},
+    "kennedy.xls": {"bytes": 1029744, "zlib -9": 1.608, "bz2 -9": 1.012, "xz -9": 0.382, "brotli 11": 0.478, "ptc": 0.787},
+    "ptt5": {"bytes": 513216, "zlib -9": 0.814, "bz2 -9": 0.776, "xz -9": 0.655, "brotli 11": 0.638, "ptc": 0.834}
+  },
+
+  "ptc_evolution": {
+    "_about": "Effect of adding a match model and a stride detector to the pure context-mixing compressor. Predicted in advance that kennedy.xls would gain most, because it is a fixed-record spreadsheet and the model was 1-D.",
+    "order124_only": {"alice29.txt": 2.821, "book1": 2.817, "kennedy.xls": 0.985, "ptt5": 0.909},
+    "plus_match_and_stride": {"alice29.txt": 2.606, "book1": 2.679, "kennedy.xls": 0.787, "ptt5": 0.834}
+  },
+
+  "model_comparison": {
+    "_about": "llm_ptc, identical 8192-byte sample of alice29.txt, identical coder, LIMIT=1024. Only the model changes.",
+    "sample_bytes": 8192,
+    "models": [
+      {"name": "GPT-2 124M",     "params_m": 124, "bpb": 1.821, "bytes_per_s": 41, "disk_mb": 551,  "kind": "base"},
+      {"name": "Qwen3-0.6B",     "params_m": 600, "bpb": 1.110, "bytes_per_s": 23, "disk_mb": 1519, "kind": "instruct"},
+      {"name": "SmolLM2-135M",   "params_m": 135, "bpb": 0.990, "bytes_per_s": 69, "disk_mb": 272,  "kind": "base"}
+    ]
+  },
+
+  "headline_alice29": {
+    "_about": "Full alice29.txt, 152089 bytes. llm_ptc rows are batched-encode MEASUREMENTS, not verified codec output - see caveats in the README.",
+    "bytes": 152089,
+    "results": {
+      "llm_ptc + SmolLM2-135M": {"bpb": 0.939, "size": 17846, "bytes_per_s": 963},
+      "ts_zip (published)":     {"bpb": 1.142, "size": 21711},
+      "llm_ptc + GPT-2":        {"bpb": 1.834, "size": 34868, "bytes_per_s": 54},
+      "bz2 -9":                 {"bpb": 2.272, "size": 43202},
+      "brotli 11":              {"bpb": 2.445, "size": 46487},
+      "xz -9":                  {"bpb": 2.551, "size": 48492},
+      "ptc":                    {"bpb": 2.606, "size": 49543}
+    }
+  },
+
+  "contamination_test": {
+    "_about": "Identical 50757-byte samples. post2026.txt is prose from a 2026 arXiv paper, published long after SmolLM2's training cutoff. xz is the control: it cannot memorise, so a surviving advantage over xz is not memorisation.",
+    "sample_bytes": 50757,
+    "alice29_likely_memorised": {"llm_ptc": 0.972, "xz -9": 2.881, "bz2 -9": 2.609, "ptc": 3.025, "advantage_over_xz": 2.964},
+    "post2026_definitely_unseen": {"llm_ptc": 1.338, "xz -9": 2.844, "bz2 -9": 2.809, "ptc": 3.225, "advantage_over_xz": 2.126}
+  },
+
+  "enwik8_ablation": {
+    "_about": "262144-byte slice from offset 50,000,000 of enwik8. Mid-file on purpose: the first 256 KB contains the XML preamble and scores an artificially good 0.811, a 13% bias.",
+    "sample_bytes": 262144,
+    "reference": {"xz -9": 2.623, "bz2 -9": 2.561, "ptc": 2.785},
+    "variants": [
+      {"config": "LLM only",                  "bpb": 0.928, "bytes_per_s": 1088},
+      {"config": "+ match order 4",           "bpb": 0.917, "bytes_per_s": 1056, "default": true},
+      {"config": "+ match orders 2,4,6,8",    "bpb": 0.915, "bytes_per_s": 789},
+      {"config": "+ APM/SSE, 25% weight",     "bpb": 0.918, "bytes_per_s": 1062},
+      {"config": "+ APM/SSE, 75% weight",     "bpb": 0.926, "bytes_per_s": 887},
+      {"config": "+ naive linear blend",      "bpb": 0.833, "bytes_per_s": 1063, "note": "measured on the BIASED first-256KB slice, where LLM-only was 0.817"}
+    ]
+  },
+
+  "coder_efficiency": {
+    "_about": "probe.py. 'raw model' is -log2 p under the model's own distribution; 'quantised' is under the 12-bit probabilities we actually code against; 'emitted' is real output. coder = emitted/quantised - 1. smoothing = quantised/raw - 1, where negative means the 12-bit clamp SMOOTHS an overconfident model and wins.",
+    "sample_bytes": 4096,
+    "gpt2": [
+      {"context": 256, "raw": 2.009, "quantised": 1.874, "emitted": 1.889, "coder_pct": 0.81, "smoothing_pct": -6.75},
+      {"context": 512, "raw": 1.991, "quantised": 1.875, "emitted": 1.891, "coder_pct": 0.81, "smoothing_pct": -5.82},
+      {"context": 1024, "raw": 1.993, "quantised": 1.888, "emitted": 1.902, "coder_pct": 0.77, "smoothing_pct": -5.29}
+    ],
+    "smollm2_135m": [
+      {"context": 256, "raw": 1.024, "quantised": 1.024, "emitted": 1.039, "coder_pct": 1.43, "smoothing_pct": 0.03},
+      {"context": 512, "raw": 0.999, "quantised": 0.999, "emitted": 1.018, "coder_pct": 1.86, "smoothing_pct": 0.04},
+      {"context": 1024, "raw": 0.990, "quantised": 0.990, "emitted": 1.008, "coder_pct": 1.79, "smoothing_pct": 0.05}
+    ]
+  },
+
+  "negative_results": [
+    {"claim": "bfloat16 weights will be ~2x faster because the checkpoint is 16-bit and we are memory-bandwidth bound", "outcome": "REFUTED", "detail": "64 B/s vs float32's 84 B/s. No AVX512-BF16 on this CPU, so torch converts to fp32 per matmul and we pay conversion on top."},
+    {"claim": "the gap to ts_zip is mostly our 512-token context resets", "outcome": "REFUTED", "detail": "Sweeping context 256->1024 moved GPT-2's bpb by -0.7%, i.e. noise, and post-slide tokens cost the same as deep-in-window ones. The gap was the model."},
+    {"claim": "blending a match prediction into the LLM distribution will help on repetitive markup", "outcome": "REFUTED as implemented", "detail": "Naive linear interpolation measured 2% WORSE. Fixed by mixing in the logistic domain with learned weights, which then gave -1.2%."},
+    {"claim": "12-bit probability quantisation costs ratio", "outcome": "INVERTED", "detail": "It GAINS 5.3% against GPT-2 by smoothing an overconfident model. Against well-calibrated SmolLM2 it is worth +0.05%, i.e. nothing."},
+    {"claim": "SSE/APM will help, as it does in every serious CM compressor", "outcome": "REFUTED", "detail": "Neutral at 25% weight (0.918 vs 0.917), harmful at 75% (0.926). SSE fixes miscalibrated mixers; a well-calibrated LLM has nothing to recalibrate."},
+    {"claim": "batched teacher-forced encoding is a free 16x speedup", "outcome": "PARTIAL", "detail": "16x faster and byte-identical output, but the stream does NOT decode with the sequential decoder - diverged at byte 253. Valid as a ratio measurement, invalid as a codec until inference is integer."},
+    {"claim": "the first 256 KB of enwik8 is a representative sample", "outcome": "REFUTED", "detail": "0.811 there vs 0.917 mid-file. The XML preamble inflated it by 13%."}
+  ]
+}

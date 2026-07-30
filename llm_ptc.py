@@ -1,0 +1,474 @@
+"""A language model as the predictor, ptc's arithmetic coder as the mouth.
+
+Same architecture as ptc - predictor feeds probabilities to a coder that spends
+-log2(p) bits per outcome. We swapped four hash tables for a pretrained model.
+bench.py established the coder was never the bottleneck (<1% waste).
+
+Two predictors, blended the way ptc blends its own:
+  LLM    - the pretrained model's next-token distribution
+  match  - long-range exact repeats over the whole token stream, which the LLM
+           cannot see past its LIMIT-token window
+
+The match model is the ONLY added predictor that pays (-1.2%), and it pays
+because it supplies information the LLM structurally cannot have. The rest of
+the context-mixing toolbox - extra match orders, SSE/APM - measured neutral to
+harmful here: that machinery exists to prop up weak predictors, and this
+predictor is not weak. See the numbers next to ORDERS below.
+
+They are mixed in the LOGISTIC domain with weights learned online, starting at
+full trust in the LLM and zero in the match. That matters: naive linear
+interpolation of a point mass into the LLM's distribution measured 2% WORSE on
+enwik8 (0.833 vs 0.817), because it steals mass from the LLM even when the LLM
+is already right. A learned mixer weights a useless input out instead.
+
+The coder is reused unchanged by binarising the token id: VBITS binary
+decisions walk down the id space, each probability read off the cumulative
+distribution. Exact, and no multi-symbol coder to get wrong.
+
+ponytail: v1 does not mix in ptc's byte-level hash contexts - that needs
+        marginalising a multi-byte tokenizer over bytes, which is real work.
+ponytail: same-process round-trip only. Cross-machine needs quantised weights
+        and pinned kernels (ts_zip does this); float32 on one box is
+        reproducible enough to measure a ratio.
+"""
+import os
+import sys
+import time
+from array import array
+
+import numpy as np
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import ptc
+
+MODEL = os.environ.get('LLM_PTC_MODEL', 'gpt2')
+VBITS = 16                            # set by _load() from the model's vocab size
+SCALE = 1 << 30                       # integer resolution of the distribution
+LIMIT = int(os.environ.get('LLM_PTC_LIMIT', 1024))    # context budget, capped by
+WINDOW = int(os.environ.get('LLM_PTC_WINDOW', LIMIT // 2))   # the model in _load()
+# Measured on a representative enwik8 slice (262,144 B, mid-file):
+#   LLM only ............................ 0.928 bpb   1088 B/s
+#   + match order 4 ..................... 0.917       1056      <- default, best trade
+#   + match orders 2,4,6,8 .............. 0.915        789      +0.2% for -25% speed
+#   + APM/SSE at 25% weight ............. 0.918       1062      no help
+#   + APM/SSE at 75% weight ............. 0.926        887      actively harmful
+ORDERS = [int(x) for x in os.environ.get('LLM_PTC_ORDERS', '4').split(',') if x]
+MAXLEN = 31                           # match length doubles as a confidence bucket
+MMASK = (1 << 22) - 1                 # match index size
+# OFF by default, and that is a result not an oversight: SSE exists to fix a
+# miscalibrated mixer, and a well-calibrated LLM has nothing to recalibrate, so
+# the APM's own estimation noise costs more than it saves. Tested at two weights.
+APM_ON = os.environ.get('LLM_PTC_APM', '0') != '0'
+APM_W = int(os.environ.get('LLM_PTC_APM_W', 3))   # APM share of the final p, /4
+LR = 12                               # mixer learning rate (right-shift)
+RATE = 5                              # match counter adaptation (right-shift)
+_LOADED = {}
+
+
+def _load():
+    if MODEL not in _LOADED:
+        # Thread count is part of the format: it can change float reduction order,
+        # so encoder and decoder must agree. Same process = same count = safe, and
+        # the round-trip assert is what actually proves it.
+        torch.set_num_threads(int(os.environ.get('LLM_PTC_THREADS', os.cpu_count() or 4)))
+        torch.set_grad_enabled(False)
+        # These checkpoints ship in 16-bit (272 MB / 135M params = 2.0 B/param), but
+        # float32 measured FASTER here: this CPU has no AVX512-BF16, so torch
+        # converts bf16 to fp32 per matmul anyway and we pay the conversion.
+        dtype = getattr(torch, os.environ.get('LLM_PTC_DTYPE', 'float32'))
+        tok = AutoTokenizer.from_pretrained(MODEL)
+        model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=dtype)
+        model.eval()
+        # Token ids must fit the binarised id space, and gpt2's 50257 is not a
+        # safe assumption - Qwen3 has 151936, which needs 18 bits not 16.
+        global VBITS, LIMIT
+        VBITS = max(1, (model.config.vocab_size - 1).bit_length())
+        LIMIT = min(LIMIT, getattr(model.config, 'max_position_embeddings', LIMIT))
+        _LOADED[MODEL] = (tok, model)
+    return _LOADED[MODEL]
+
+
+class Predictor:
+    """Wraps the model so it looks like ptc's Model: feed a symbol, get a
+    distribution for the next one. Holds the KV cache so each step is O(1)."""
+
+    def __init__(self):
+        self.tok, self.model = _load()
+        self.V = self.model.config.vocab_size
+        self.cdf = np.zeros((1 << VBITS) + 1, dtype=np.int64)
+        self.prob = None
+        self.past = None
+        self.ids = []
+
+    def feed(self, tid):
+        """Advance one token; refresh the distribution for the next one.
+
+        Models with absolute position embeddings die past LIMIT tokens, so on
+        overflow we rebuild the cache from the last WINDOW tokens. Depends only
+        on the token sequence, so both sides slide at exactly the same place.
+        """
+        self.ids.append(tid)
+        if len(self.ids) > LIMIT:
+            self.ids = self.ids[-WINDOW:]
+            out = self.model(input_ids=torch.tensor([self.ids]), use_cache=True)
+        else:
+            out = self.model(input_ids=torch.tensor([[tid]]),
+                             past_key_values=self.past, use_cache=True)
+        self.past = out.past_key_values
+        self.prob = torch.softmax(out.logits[0, -1].double(), -1).numpy()
+
+
+class _Match:
+    """One exact-repeat predictor at a fixed context order."""
+    __slots__ = ('order', 'table', 'mtab', 'ptr', 'len', 'idx')
+
+    def __init__(self, order):
+        self.order = order
+        self.table = array('i', [0]) * (MMASK + 1)   # context hash -> next position
+        self.mtab = array('H', [ptc.ONE >> 1]) * (2 * (MAXLEN + 1))
+        self.ptr = 0
+        self.len = 0
+        self.idx = -1
+
+
+class MatchBank:
+    """Exact-repeat predictors at several context orders, over one shared token
+    history.
+
+    The LLM only sees LIMIT tokens. These reach back across the whole file,
+    where wiki markup keeps its repeated templates, tags and link syntax -
+    structure xz eats wholesale and a bounded-context model cannot see at all.
+
+    Long orders fire rarely but confidently, short orders fire constantly and
+    are often wrong. Nobody tunes that tradeoff: each reports a per-BIT opinion
+    through a counter learned on (match length, expected bit), and the mixer
+    learns how far to trust each one.
+    """
+
+    def __init__(self, orders):
+        self.hist = array('i')
+        self.models = [_Match(o) for o in orders]
+
+    def _hash(self, order):
+        h = 0
+        for t in self.hist[-order:]:
+            h = (h * 0x100000001B3 ^ t) & 0xFFFFFFFFFFFFFFFF
+        return (h >> 20) & MMASK
+
+    def opinions(self, lo, hi):
+        """One 12-bit probability per model; None where it has nothing to say."""
+        mid = (lo + hi) >> 1
+        h, n, out = self.hist, len(self.hist), []
+        for m in self.models:
+            if m.len and m.ptr < n:
+                t = h[m.ptr]
+                if lo <= t < hi:                 # still consistent with bits so far
+                    m.idx = min(m.len, MAXLEN) * 2 + (1 if t >= mid else 0)
+                    out.append(m.mtab[m.idx])
+                    continue
+            m.idx = -1
+            out.append(None)
+        return out
+
+    def learn(self, bit):
+        target = bit << ptc.BITS
+        for m in self.models:
+            if m.idx >= 0:
+                v = m.mtab[m.idx] + ((target - m.mtab[m.idx]) >> RATE)
+                m.mtab[m.idx] = 1 if v < 1 else ptc.ONE - 1 if v > ptc.ONE - 1 else v
+
+    def best_len(self):
+        return max((m.len for m in self.models), default=0)
+
+    def push(self, tid):
+        h = self.hist
+        n = len(h)
+        for m in self.models:
+            if m.len and m.ptr < n:
+                if h[m.ptr] == tid:
+                    m.ptr += 1
+                    m.len = min(m.len + 1, MAXLEN)
+                else:
+                    m.len = 0
+        h.append(tid)
+        n += 1
+        for m in self.models:
+            if n >= m.order:
+                k = self._hash(m.order)
+                if not m.len:
+                    cand = m.table[k]
+                    if cand:
+                        m.ptr, m.len = cand, 1
+                m.table[k] = n
+
+
+class Mixer:
+    """Blends N predictions per binary decision, in the logistic domain, with
+    weights learned online.
+
+    Initialised to full trust in input 0 (the LLM) and zero elsewhere, so it
+    starts exactly equal to LLM-only and can only improve: a useless input gets
+    weighted out rather than dragging the distribution around. Naive linear
+    interpolation lacks that property and measured 2% WORSE on enwik8.
+    """
+
+    def __init__(self, n):
+        self.w = [1 << 16] + [0] * (n - 1)
+        self.st = [0] * n
+        self.p = ptc.ONE >> 1
+
+    def mix(self, probs):
+        total = 0
+        for i, p in enumerate(probs):
+            s = ptc._STRETCH[p] if p is not None else 0
+            self.st[i] = s
+            total += self.w[i] * s
+        self.p = ptc._squash(total >> 16)
+        return self.p
+
+    def update(self, bit):
+        err = (bit << ptc.BITS) - self.p
+        for i in range(len(self.w)):
+            self.w[i] += (self.st[i] * err) >> LR   # st = 0 means no vote, no update
+
+
+class APM:
+    """Adaptive probability map, a.k.a. SSE. Takes the mixer's output and
+    recalibrates it against a context by interpolating between learned buckets
+    in the stretched domain.
+
+    This is the stage every serious context-mixing compressor has and ptc does
+    not. It exists because a mixer's output is systematically miscalibrated in
+    ways that depend on state - here, on how long the current match is and how
+    deep into the token we are. Initialised to the identity so it starts neutral.
+    """
+
+    BUCKETS = 33                       # 32 stretch intervals plus the right edge
+
+    def __init__(self, n_ctx):
+        self.t = array('H', [0]) * (n_ctx * self.BUCKETS)
+        for c in range(n_ctx):
+            base = c * self.BUCKETS
+            for b in range(self.BUCKETS):
+                self.t[base + b] = ptc._squash((b - 16) * 128)
+        self.i = 0
+        self.frac = 0
+
+    def refine(self, p, ctx):
+        s = ptc._STRETCH[p] + 2048       # 1..4095
+        self.i = ctx * self.BUCKETS + (s >> 7)
+        self.frac = s & 127
+        return (self.t[self.i] * (128 - self.frac)
+                + self.t[self.i + 1] * self.frac) >> 7
+
+    def update(self, bit):
+        target = ptc.ONE - 1 if bit else 1
+        for j in (self.i, self.i + 1):
+            v = self.t[j] + ((target - self.t[j]) >> 6)
+            self.t[j] = 1 if v < 1 else ptc.ONE - 1 if v > ptc.ONE - 1 else v
+
+
+def _build_cdf(cdf, prob, vocab):
+    """Integer CDF over the model's distribution. Every token gets at least one
+    count so that any token remains codable."""
+    freq = np.maximum((prob * SCALE).astype(np.int64), 1)
+    np.cumsum(freq, out=cdf[1:vocab + 1])
+    cdf[vocab + 1:] = cdf[vocab]
+
+
+def _split(cdf, lo, hi):
+    """P(token lands in the upper half of [lo, hi)), as a 12-bit probability."""
+    mid = (lo + hi) >> 1
+    low = int(cdf[mid]) - int(cdf[lo])
+    high = int(cdf[hi]) - int(cdf[mid])
+    total = low + high
+    if not total:
+        return ptc.ONE >> 1, mid                 # unreachable, but identical both sides
+    p = (high * ptc.ONE) // total
+    return (1 if p < 1 else ptc.ONE - 1 if p > ptc.ONE - 1 else p), mid
+
+
+def _code_token(coder, cdf, bank, mixer, apm, tid=None):
+    """Walk the binarised id space. Encodes when tid is given, otherwise decodes
+    and returns the token. One body for both directions, so they cannot drift."""
+    lo, hi = 0, 1 << VBITS
+    # Match state as of before this token - identical on both sides.
+    mlen = min(bank.best_len(), 7) if bank is not None else 0
+    for depth in range(VBITS):
+        p_llm, mid = _split(cdf, lo, hi)
+        if bank is not None:
+            p = mixer.mix([p_llm] + bank.opinions(lo, hi))
+            if apm is not None:
+                # Blend rather than replace: hedges while the APM is still cold.
+                p = (APM_W * apm.refine(p, mlen * VBITS + depth)
+                     + (4 - APM_W) * p) >> 2
+                p = 1 if p < 1 else ptc.ONE - 1 if p > ptc.ONE - 1 else p
+        else:
+            p = p_llm
+        if tid is None:
+            bit = coder.decode(p)
+        else:
+            bit = 1 if tid >= mid else 0
+            coder.encode(bit, p)
+        if bank is not None:
+            mixer.update(bit)
+            bank.learn(bit)
+            if apm is not None:
+                apm.update(bit)
+        lo, hi = (mid, hi) if bit else (lo, mid)
+    return lo
+
+
+def _schedule(n):
+    """For each token index i, where its context starts in the virtual sequence
+    V = [eos, t0, t1, ...]. Replays feed()'s window bookkeeping with no model
+    calls, so the batched encoder reproduces the decoder's contexts exactly."""
+    s, out = 0, []
+    for i in range(n):
+        if i - s + 1 > LIMIT:
+            s = i - WINDOW + 1
+        out.append(s)
+    return out
+
+
+def _progress(done, total, bits, data_len):
+    seen = data_len * done / total
+    print(f'  ... {done:,}/{total:,} tokens, {bits / seen:.3f} bpb so far',
+          file=sys.stderr, flush=True)
+
+
+def compress(data):
+    if not data:
+        return b''
+    tok, _ = _load()
+    ids = tok(data.decode('utf-8')).input_ids
+    pred, enc = Predictor(), ptc.Encoder()
+    bank = MatchBank(ORDERS) if ORDERS else None
+    mixer = Mixer(1 + len(ORDERS)) if ORDERS else None
+    apm = APM(8 * VBITS) if ORDERS and APM_ON else None
+    prev = tok.eos_token_id
+    chatty = len(ids) > 10000
+    for i, tid in enumerate(ids):
+        if chatty and i and not i % 2000:
+            _progress(i, len(ids), 8 * len(enc.out), len(data))
+        pred.feed(prev)
+        _build_cdf(pred.cdf, pred.prob, pred.V)
+        _code_token(enc, pred.cdf, bank, mixer, apm, tid)
+        if bank is not None:
+            bank.push(tid)
+        prev = tid
+    return len(ids).to_bytes(4, 'big') + enc.finish()
+
+
+def compress_batched(data):
+    """Same output as compress(), one forward per WINDOW instead of per token.
+
+    Legal only when encoding: the whole token sequence is already known, and
+    causal masking means position k's distribution depends only on 0..k. So one
+    pass yields every distribution, reading the weights once per window rather
+    than once per token. Measured 15.9x faster, byte-identical output.
+
+    ponytail: batched and single-token GEMMs reduce floats in a different order.
+            The 12-bit quantisation does NOT absorb it - round-trip through the
+            sequential decoder diverged at byte 253. So this path is a valid
+            RATIO MEASUREMENT and an invalid CODEC until inference is integer.
+    """
+    if not data:
+        return b''
+    tok, model = _load()
+    ids = tok(data.decode('utf-8')).input_ids
+    virt = [tok.eos_token_id] + ids               # virt[k] predicts ids[k]
+    starts = _schedule(len(ids))
+    enc = ptc.Encoder()
+    bank = MatchBank(ORDERS) if ORDERS else None
+    mixer = Mixer(1 + len(ORDERS)) if ORDERS else None
+    apm = APM(8 * VBITS) if ORDERS and APM_ON else None
+    vocab = model.config.vocab_size
+    cdf = np.zeros((1 << VBITS) + 1, dtype=np.int64)
+    chatty = len(ids) > 10000
+
+    i = 0
+    while i < len(ids):
+        s = starts[i]
+        j = i
+        while j + 1 < len(ids) and starts[j + 1] == s:
+            j += 1                               # widest run sharing this context base
+        logits = model(input_ids=torch.tensor([virt[s:j + 1]])).logits[0]
+        for k in range(i, j + 1):
+            _build_cdf(cdf, torch.softmax(logits[k - s].double(), -1).numpy(), vocab)
+            _code_token(enc, cdf, bank, mixer, apm, ids[k])
+            if bank is not None:
+                bank.push(ids[k])
+        i = j + 1
+        if chatty:
+            _progress(i, len(ids), 8 * len(enc.out), len(data))
+    return len(ids).to_bytes(4, 'big') + enc.finish()
+
+
+def decompress(blob):
+    if not blob:
+        return b''
+    tok, _ = _load()
+    n = int.from_bytes(blob[:4], 'big')
+    pred, dec = Predictor(), ptc.Decoder(blob[4:])
+    bank = MatchBank(ORDERS) if ORDERS else None
+    mixer = Mixer(1 + len(ORDERS)) if ORDERS else None
+    apm = APM(8 * VBITS) if ORDERS and APM_ON else None
+    prev = tok.eos_token_id
+    ids = []
+    for _ in range(n):
+        pred.feed(prev)
+        _build_cdf(pred.cdf, pred.prob, pred.V)
+        tid = _code_token(dec, pred.cdf, bank, mixer, apm)
+        ids.append(tid)
+        if bank is not None:
+            bank.push(tid)
+        prev = tid
+    return tok.decode(ids).encode('utf-8')
+
+
+if __name__ == '__main__':
+    path = sys.argv[1] if len(sys.argv) > 1 else 'corpus/alice29.txt'
+    cap = int(sys.argv[2]) if len(sys.argv) > 2 else 2048
+    data = open(path, 'rb').read()[:cap]
+    _load()                                      # keep load time out of the timings
+
+    # Ratio needs compress() only. Decoding proves correctness, and that is
+    # already verified on prefixes through this same code path - so a long
+    # headline run can skip it and cost half as much.
+    encode_only = 'enc' in sys.argv[3:]
+    batched = 'batch' in sys.argv[3:]
+
+    t = time.perf_counter()
+    packed = (compress_batched if batched else compress)(data)
+    tc = time.perf_counter() - t
+    td = None
+    if batched and not encode_only:
+        print('  (batched encode, sequential decode - this is the validity test)')
+
+    if encode_only:
+        print(f'{os.path.basename(path)} first {len(data):,} B   '
+              f'round-trip: NOT RUN (encode-only)')
+    else:
+        t = time.perf_counter()
+        back = decompress(packed)
+        td = time.perf_counter() - t
+        ok = back == data
+        print(f'{os.path.basename(path)} first {len(data):,} B   round-trip: '
+              f'{"ok" if ok else "FAILED"}')
+        if not ok:
+            sys.exit('  diverged at byte '
+                     f'{next(i for i, (a, b) in enumerate(zip(back, data)) if a != b)}')
+    import bz2
+    import lzma
+    rate = f'{len(data) / tc:.0f} B/s enc' + (f', {len(data) / td:.0f} B/s dec' if td else '')
+    print(f'  llm_ptc  {len(packed):>8,} B  {8 * len(packed) / len(data):.3f} bpb   {rate}')
+    for name, fn in (('ptc', ptc.compress), ('xz -9', lambda d: lzma.compress(d, preset=9)),
+                     ('bz2 -9', lambda d: bz2.compress(d, 9))):
+        c = fn(data)
+        print(f'  {name:<8} {len(c):>8,} B  {8 * len(c) / len(data):.3f} bpb')
+    mb = sum(os.path.getsize(os.path.join(r, f))
+             for r, _, fs in os.walk(os.path.expanduser('~/.cache/huggingface/hub'))
+             for f in fs if MODEL.replace('/', '--') in r) / 1e6
+    print(f'  (model on disk: {mb:,.0f} MB - free only where both ends already have it)')

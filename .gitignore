@@ -1,0 +1,17 @@
+# Corpora are fetched, never committed - see scripts/fetch_corpus.py.
+# Two reasons, not just size (enwik8 alone is 100 MB):
+#   - these are other people's texts under their own licences, and this repo is
+#     MIT. Redistributing them here would be relicensing what is not ours.
+#   - the 2026 arXiv control text carries its author's contact details, which
+#     should not be republished into a public repo for scrapers to harvest.
+# The fetch script reproduces every file and verifies it, which is all
+# reproducibility actually requires.
+corpus/*
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store

@@ -194,6 +194,35 @@ def chart_speed_ratio():
     _save(fig, 'chart_speed_ratio.svg')
 
 
+def chart_shapes():
+    """Part 2: what each of the three targets actually returned."""
+    rows = [
+        ('OCI layer, zstd re-encode', 32.3, OURS),
+        ('SQL dump, narrow columns', 17.8, OURS),
+        ('SQLite, page grouping', 4.0, BAD),
+        ('SQL dump, one blob column', 0.1, BAD),
+    ]
+    fig, ax = _fig(n=len(rows), h=3.0)
+    y = range(len(rows))
+    ax.barh(list(y), [r[1] for r in rows], color=[r[2] for r in rows],
+            height=0.6, zorder=3)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels([r[0] for r in rows], color=INK, fontsize=9)
+    ax.invert_yaxis()
+    ax.xaxis.grid(True, color=GRID, zorder=0, linewidth=0.8)
+    ax.set_xlabel('% smaller than the best existing tool', color=MUTED, fontsize=9)
+    ax.set_title('Part 2: three targets, one clear winner', color=INK, fontsize=11.5,
+                 loc='left', pad=14, fontweight='bold')
+    for i, r in enumerate(rows):
+        ax.text(r[1] + 0.6, i, f'{r[1]:.1f}%', va='center', color=INK,
+                fontsize=9, fontweight='bold')
+    ax.set_xlim(0, 38)
+    ax.text(0, 1.0, 'The biggest win needed no code: zstd is already a legal OCI layer '
+                    'type. Registries ship gzip anyway.',
+            transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
+    _save(fig, 'chart_shapes.svg')
+
+
 if __name__ == '__main__':
     chart_headline()
     chart_models()
@@ -201,3 +230,4 @@ if __name__ == '__main__':
     chart_contamination()
     chart_ptc_evolution()
     chart_speed_ratio()
+    chart_shapes()

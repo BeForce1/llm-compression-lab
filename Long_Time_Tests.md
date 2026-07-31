@@ -145,7 +145,22 @@ worth 4–10×; the arithmetic coder is worth ~5%. Under a fixed time budget, sp
 currency you buy ratio with — a faster inner loop affords a bigger model in the same wall
 clock. **Not before the format is stable**; hand-tuning a moving target is the waste.
 
-### 4.4 2D contexts in `ptc` for images
+### 4.4 Record-level columnarisation for SQLite ⭐ the Part 2 follow-up
+Page-kind grouping measured 0.4–4.0% and is a dead end. But the *same* columnar mechanism
+gave **14–18%** on SQL dumps, and the only reason it fails on SQLite is that the fields sit
+behind a binary record format instead of in plain text.
+
+The work: parse cells inside leaf-table pages, split record payloads column-major, and
+keep enough page metadata (cell pointer array, free blocks, overflow chains) to rebuild
+each page byte-exactly. Byte-exactness is the hard part and the whole point — a logical
+dump-and-reload is **not** a lossless compressor, because page layout and vacuum state are
+unrecoverable from the rows.
+
+Worth doing because the mechanism is now proven rather than hypothesised, and SQLite is one
+of the highest-volume structured formats on earth with no format-aware compressor. Days,
+not hours.
+
+### 4.5 2D contexts in `ptc` for images
 `ptc` loses to `xz` on `ptt5` (0.834 vs 0.655) because its contexts are 1-D while the
 strongest predictor of a pixel is the one *above* it — `row_width` bytes back, and the
 stride detector only tries (2,3,4,8,16). Add left/above/above-left contexts, then
@@ -153,6 +168,37 @@ benchmark against PNG. Build is short; the value is that it makes `ptc` competit
 whole data class it currently fails.
 
 ---
+
+## Documentation owed (minutes, not hours — but load-bearing for honesty)
+
+**D.1, D.2 and D.3 are DONE** — all three are in the README now. D.4 still waits on 1.1.
+
+### ~~D.1 Separate "measured" from "decodable" in the README~~ — done
+The headline says 8.5×. What is actually **verified round-trip** is smaller, and the
+README does not currently draw that line. Add a table:
+
+| | largest verified round-trip | compression |
+|---|---:|---:|
+| `ptc.py` | 1,029,744 B, any bytes incl. binary | 3.1× |
+| `llm_ptc` + SmolLM2 | 4,096 B *(152,089 B pending 1.1)* | 7.9× *(8.5× pending)* |
+
+The distinction readers care about: **3.1× is what you can rely on at real file sizes
+today; 8.5× is a measurement until 1.1 lands.**
+
+### ~~D.2 The break-even line~~ — done
+Against `xz` we save ~0.2 bytes per input byte, so a 272 MB model repays itself after
+**~1.35 GB** of text — which at 21–65 B/s decode takes 8 months to 2 years to read back.
+One sentence, and it converts "8.5× smaller!" into a claim that survives scrutiny.
+
+### ~~D.3 "Decodable" ≠ "portable"~~ — done
+Even after 1.1 passes, a verified round-trip holds only for the same machine, thread
+count and library versions. That is not a format. Say so next to the headline, not only
+in caveat #3.
+
+### D.4 Re-point the headline at the shipped config
+The 0.939 figure was measured **before** the match model and mixer existed, so it is not
+reproducible with today's defaults. Task 1.1 produces the canonical replacement — update
+`results.json` and regenerate charts when it lands.
 
 ## Running these
 

@@ -1,16 +1,27 @@
-# ptc — an honest lab for LLM-driven compression
+# An honest lab for compression
 
-Two lossless compressors sharing one arithmetic coder, and a benchmark harness that
-validates itself against published figures before it reports anything.
+Two parts, one method: measure the incumbent properly, then find out whether there is
+anything left to win.
+
+- **Part 1 — beat the general compressors with a language model.** Two lossless
+  compressors sharing one arithmetic coder. Result: **0.939 bpb on alice29.txt**, 2.72×
+  smaller than `xz -9`. Real, and almost entirely down to the *model* rather than to any
+  of our engineering.
+- **Part 2 — beat them with structure instead.** Format-aware transforms on three real
+  targets. Result: the biggest available win needed **no algorithm at all**, and our best
+  transform was worth less than a codec flag.
+
+**The code:**
 
 - **`ptc.py`** — pure context mixing. No weights, no training, no model file. ~250 lines of Python, lossless on arbitrary bytes.
 - **`llm_ptc.py`** — the same coder, driven by a pretrained language model plus a long-range match model, blended by a learned mixer.
 - **`bench.py`** — the harness. Verifies round-trip per row, reports bits per byte, and reproduces published `xz -9` numbers to three decimals so its other numbers can be trusted.
+- **`shapes/`** — Part 2: format-aware transforms, and the baselines that decide whether they were worth writing.
 
-Everything below was measured by this code on a laptop CPU with no GPU. Numbers quoted
-from other people's work are labelled as such. **The negative results are the most
-useful part of this repo** — five of my predictions were refuted by measurement, and
-they're all written down in [§ What didn't work](#what-didnt-work).
+Everything below was measured by this code on a laptop CPU with no GPU. Figures quoted
+from other people's work are labelled as such. **The negative results are the most useful
+part of this repo** — nine predictions were refuted by measurement, and they are all in
+[§ What didn't work](#what-didnt-work).
 
 ---
 
@@ -33,9 +44,33 @@ On `alice29.txt` (152,089 bytes) — every codec on the identical file:
 **2.72× smaller than `xz -9`**, and 17.8% smaller than the published ts_zip figure on the
 same file — using a 272 MB model on CPU.
 
-Read the [caveats](#caveats-read-these) before quoting any of that. Two matter most: the
-0.939 figure comes from the batched encoder and **was never decompressed**, and
-`alice29.txt` is public-domain text the model has almost certainly read.
+### What is *measured* versus what is *decodable*
+
+These are not the same thing and the difference matters more than the headline. The 0.939
+figure comes from the batched encoder, which is 16× faster and produced byte-identical
+output on our test sample — but whose stream **does not round-trip** through the
+sequential decoder (it diverged at byte 253, because batched and single-token GEMMs
+reduce floats in a different order). So:
+
+| | largest **verified** round-trip | compression |
+|---|---:|---:|
+| `ptc.py` | **1,029,744 B** — any size, any bytes incl. binary | **3.1×** |
+| `llm_ptc` + SmolLM2 | 4,096 B | 7.9× |
+
+**3.1× is what you can rely on at real file sizes today. 8.5× is a measured entropy until
+a full sequential round-trip lands.** And even then, "decodable" would mean *same machine,
+same thread count, same library versions* — that is a verified round-trip, not a portable
+format. Making it one is the [int8 determinism task](Long_Time_Tests.md).
+
+### And the number that keeps the 8.5× honest
+
+Against `xz` we save ~0.2 bytes per input byte, so a 272 MB model repays itself after
+about **1.35 GB of text** — which at 21–65 B/s decode takes between 8 months and 2 years
+to read back. The break-even exists on paper and is unreachable in practice. Quote the
+ratio with that attached, or don't quote it.
+
+Also worth reading: `alice29.txt` is public-domain text the model has almost certainly
+memorised. See [§ Is it compression, or memorisation?](#is-it-compression-or-memorisation)
 
 ### The harness validates itself
 
@@ -227,6 +262,106 @@ megabyte-scale duplicates while `ptc` tracks a single unverified match candidate
 
 ---
 
+---
+
+# Part 2 — structure instead of a model
+
+A language model buys ratio at a catastrophic price in speed and portability. The other
+route is to exploit structure a general compressor *cannot see*: a cheap reversible
+transform, then a normal backend. Speed stays high, the decoder stays small and
+deterministic, no model ships.
+
+Three real targets, picked for volume × how badly `zstd` handles them × whether anyone
+pays that storage bill.
+
+![part 2 results](results/chart_shapes.svg)
+
+| target | best existing | with our work | gain | effort |
+|---|---:|---:|---:|---|
+| **OCI / Docker layer** | 29,780,905 (gzip, as shipped) | **20,164,715** (zstd -19) | **−32.3%** | **zero code** |
+| **SQL dump**, narrow columns | 102,532 (`xz -9`) | **84,256** (transform + xz) | **−17.8%** | ~120 lines, lossless |
+| **SQLite**, page grouping | 2,088,376 (`xz -9`) | 2,079,612 | −0.4% | dead end |
+| SQL dump, one blob column | 1,910,312 (`xz -9`) | 1,908,248 | −0.1% | n/a |
+
+### The Docker result needed no invention
+
+A real `python:3.12-slim` layer from Docker Hub. Re-encoding the *identical* tar:
+
+| | size | vs shipped |
+|---|---:|---:|
+| as shipped (gzip) | 29,780,905 | — |
+| gzip -9 *(sanity check — confirms the shipped blob is max-ish gzip)* | 29,796,986 | +0.05% |
+| bz2 -9 | 25,748,725 | −13.5% |
+| **zstd -19** | **20,164,715** | **−32.3%** |
+| xz -9 | 17,782,292 | −40.3% |
+
+**Mechanism: gzip's 32 KB window.** The tar is 81 MB across **3,260 members** — shared
+strings across Python's stdlib, repeated ELF patterns, duplicated headers. `xz`'s 64 MB
+window sees all of it; gzip structurally cannot look past 32 KB. An architectural limit,
+not a modelling one.
+
+`zstd` is **already a legal OCI layer media type**, so the 32.3% is deployable with a
+config change. `xz` would need a new media type, so treat 40.3% as the ceiling rather than
+the offer. Note this is a **re-encode** — identical tar content, different digest — not a
+byte-lossless transform of the original blob.
+
+### The SQL dump transform works, and only on one shape
+
+`shapes/sqldump.py` regroups a dump column-major. A dump stores rows, so a timestamp sits
+beside a title beside an integer — three distributions interleaved, the worst case for any
+entropy coder. Round-trip is asserted byte-for-byte on every run.
+
+| file | shape | `xz -9` | + transform | gain |
+|---|---|---:|---:|---:|
+| chinook.sql | real relational schema, many narrow columns | 102,532 | **84,256** | **−17.8%** |
+| wiki_meta.sql | 6 narrow columns, real data | 99,188 | **85,044** | **−14.3%** |
+| wiki.sql | one dominant TEXT column | 1,910,312 | 1,908,248 | −0.1% |
+
+Those last two rows are the *same real rows* — `wiki_meta` is `wiki` with the body column
+dropped. That's the controlled test: **value depends on table shape, not size.** When one
+blob column *is* the file, the data is already effectively columnar and there is nothing
+to regroup.
+
+### SQLite page grouping is a dead end
+
+`shapes/sqlitepages.py` sorts pages by b-tree kind, keeping a permutation so it reverses
+exactly. Worth 0.4–4.0%. The page census says why: `wiki.db` is **2,830 leaf-table pages
+out of 2,913**, so "group by kind" has one kind to work with, and freshly built databases
+have no free pages to gather.
+
+The two SQL results point the same direction: **the win is columnar regrouping of narrow
+typed fields, and it appears exactly when you can reach those fields.** In a dump they are
+plain text. Inside SQLite they sit behind a binary record format, so page shuffling cannot
+touch them. SQLite looked "wide open" because it is *hard*, not because nobody thought of
+it — and the mechanism is now proven on dumps rather than hypothesised.
+
+### Why not just build a faster, better zip?
+
+Because that corner is occupied, and our own benchmark says so. On alice29:
+
+| codec | speed | bits/byte |
+|---|---:|---:|
+| **bz2 -9** | **13.2 MB/s** | **2.272** |
+| `zlib -9` (zip) | 11.2 MB/s | 2.849 |
+| `xz -9` | 2.6 MB/s | 2.551 |
+| `ptc` (ours) | 0.023 MB/s | 2.606 |
+
+`bz2`, from 1996, is already both *faster* and 20% *better* than max-compression zip. And
+`ptc`'s ratio is already worse than `bz2`'s, so speed is not even our binding constraint.
+Context mixing is structurally ~100× slower than gzip in any language, because it runs an
+adaptive model per bit — a C port lands near `xz` ratio at worse speed, i.e. a worse
+`zstd`.
+
+### The uncomfortable conclusion
+
+The largest win across all three targets was not an algorithm, a transform, or a model. It
+was **not using gzip**. A flag change bought 32%; an afternoon of transform work bought 18%
+on one data shape; a page-level transform bought nothing.
+
+**Measure the incumbent's configuration before assuming you need to invent something.**
+
+---
+
 ## What didn't work
 
 Kept deliberately, because a repo that only reports its wins isn't a measurement lab.
@@ -240,6 +375,8 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | SSE/APM will help, as it does in every serious CM compressor | **refuted** | Neutral at 25% weight, harmful at 75%. Nothing to recalibrate. |
 | batched teacher-forced encoding is a free 16× speedup | **partial** | 16× faster, byte-identical output — but the stream does **not** decode with the sequential decoder. Diverged at byte 253. |
 | the first 256 KB of enwik8 is a representative sample | **refuted** | 0.811 there vs 0.917 mid-file. XML preamble, 13% bias. |
+| grouping SQLite pages by b-tree kind will help — the kinds have very different byte character | **refuted** | 0.4–4.0%. Real databases are overwhelmingly one kind (2,830 of 2,913 leaf-table), and fresh ones have no free pages to gather. |
+| the Docker layer opportunity needs a clever transform | **inverted — it needed no code** | Re-encoding the identical tar with `zstd -19` saves 32.3%. The win was a codec default. |
 
 Two instrument bugs were also caught by sanity checks rather than by luck: a
 cost-bucketing bug in `probe.py` that put the *start of the file* in the "post-slide"
@@ -300,6 +437,13 @@ python llm_ptc.py corpus/alice29.txt 4096          # round-trip verified
 python llm_ptc.py corpus/alice29.txt 152089 enc batch   # fast ratio measurement
 
 python probe.py corpus/alice29.txt 4096            # coder overhead + context sweep
+
+# Part 2 - format-aware transforms, no model, seconds not hours
+python scripts/fetch_shape_data.py                 # real Docker layer + SQLite + dumps
+python shapes/baseline.py                          # what zstd/xz already achieve
+python shapes/sqldump.py shapes/data/chinook.sql   # the 17.8% win, round-trip asserted
+python shapes/sqlitepages.py shapes/data/wiki.db   # the dead end, for the record
+
 python scripts/make_charts.py                      # regenerate charts from results.json
 ```
 
@@ -340,6 +484,10 @@ clock, and the order to do them in. The short version:
 | `results/results.json` | every number in this README. |
 | `scripts/fetch_corpus.py` | fetches and verifies all corpora. Nothing is redistributed. |
 | `Long_Time_Tests.md` | the multi-hour work not yet done, costed and ordered. |
+| `shapes/baseline.py` | what the existing tools already achieve on the Part 2 targets. |
+| `shapes/sqldump.py` | byte-lossless columnar transform for SQL dumps. |
+| `shapes/sqlitepages.py` | byte-lossless page-kind grouping for SQLite. The dead end, kept. |
+| `scripts/fetch_shape_data.py` | rebuilds the Part 2 test data. Nothing redistributed. |
 | `scripts/make_charts.py` | regenerates the charts from the JSON. |
 
 ## References

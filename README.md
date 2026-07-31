@@ -461,6 +461,13 @@ and this repo is MIT — redistributing them here would be relicensing what isn'
 public repo. `scripts/fetch_corpus.py` reproduces every file and verifies it against a
 pinned size or sha256, which is all reproducibility actually needs.
 
+## Picking this up
+
+**[handoff.md](handoff.md)** — orientation for anyone arriving cold, including future-me:
+current state, what's verified versus merely measured, the eight traps that cost me real
+time, the hard rules for this repo, and a setup sanity check that catches a wrong corpus
+before it corrupts every number.
+
 ## Still outstanding
 
 The measurements this repo *hasn't* made are tracked in
@@ -483,6 +490,7 @@ clock, and the order to do them in. The short version:
 | `huffman.py` | order-0 Huffman, for reference. Loses to everything; kept to show why. |
 | `results/results.json` | every number in this README. |
 | `scripts/fetch_corpus.py` | fetches and verifies all corpora. Nothing is redistributed. |
+| `handoff.md` | orientation, traps, hard rules, and open decisions. Read first. |
 | `Long_Time_Tests.md` | the multi-hour work not yet done, costed and ordered. |
 | `shapes/baseline.py` | what the existing tools already achieve on the Part 2 targets. |
 | `shapes/sqldump.py` | byte-lossless columnar transform for SQL dumps. |

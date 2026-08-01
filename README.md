@@ -4,9 +4,9 @@ Two parts, one method: measure the incumbent properly, then find out whether the
 anything left to win.
 
 - **Part 1 — beat the general compressors with a language model.** Two lossless
-  compressors sharing one arithmetic coder. Result: **0.939 bpb on alice29.txt**, 2.72×
-  smaller than `xz -9`. Real, and almost entirely down to the *model* rather than to any
-  of our engineering.
+  compressors sharing one arithmetic coder. Result: **0.940 bpb on alice29.txt**, 2.71×
+  smaller than `xz -9`, round-trip verified on the whole file. Real, and almost entirely
+  down to the *model* rather than to any of our engineering.
 - **Part 2 — beat them with structure instead.** Format-aware transforms on three real
   targets. Result: the biggest available win needed **no algorithm at all**, and our best
   transform was worth less than a codec flag.
@@ -33,34 +33,46 @@ On `alice29.txt` (152,089 bytes) — every codec on the identical file:
 
 | codec | size | bits/byte | vs ours |
 |---|---:|---:|---:|
-| **llm_ptc + SmolLM2-135M** | **17,846** | **0.939** | — |
-| ts_zip (RWKV-169M) *— published* | ~21,711 | 1.142 | +21.6% |
+| **llm_ptc + SmolLM2-135M** | **17,873** | **0.940** | — |
+| ts_zip (RWKV-169M) *— published* | ~21,711 | 1.142 | +21.5% |
 | llm_ptc + GPT-2 124M | 34,868 | 1.834 | +95% |
 | `bz2 -9` | 43,202 | 2.272 | +142% |
 | `brotli -q 11` | 46,487 | 2.445 | +160% |
-| `xz -9` | 48,492 | 2.551 | +172% |
-| `ptc` (pure maths, this repo) | 49,543 | 2.606 | +178% |
+| `xz -9` | 48,492 | 2.551 | +171% |
+| `ptc` (pure maths, this repo) | 49,543 | 2.606 | +177% |
 
-**2.72× smaller than `xz -9`**, and 17.8% smaller than the published ts_zip figure on the
-same file — using a 272 MB model on CPU.
+**2.71× smaller than `xz -9`**, and 17.7% smaller than the published ts_zip figure on the
+same file — using a 272 MB model on CPU. That row is a **verified round-trip on the whole
+file**, not an entropy measurement; what it cost to get there is the next section.
 
 ### What is *measured* versus what is *decodable*
 
-These are not the same thing and the difference matters more than the headline. The 0.939
-figure comes from the batched encoder, which is 16× faster and produced byte-identical
-output on our test sample — but whose stream **does not round-trip** through the
-sequential decoder (it diverged at byte 253, because batched and single-token GEMMs
-reduce floats in a different order). So:
+These are not the same thing, and for most of this project's life the headline was on the
+wrong side of the line. The number used to come from the batched encoder, which is 16×
+faster but whose stream **does not round-trip** through the sequential decoder (it diverges
+at byte 253, because batched and single-token GEMMs reduce floats in a different order).
+That made 0.939 an *entropy measurement* wearing a codec's clothes.
+
+A full sequential encode **and decode** of the whole file has since closed that gap:
 
 | | largest **verified** round-trip | compression |
 |---|---:|---:|
 | `ptc.py` | **1,029,744 B** — any size, any bytes incl. binary | **3.1×** |
-| `llm_ptc` + SmolLM2 | 4,096 B | 7.9× |
+| `llm_ptc` + SmolLM2 | **152,089 B** — whole of `alice29.txt` | **8.5×** |
 
-**3.1× is what you can rely on at real file sizes today. 8.5× is a measured entropy until
-a full sequential round-trip lands.** And even then, "decodable" would mean *same machine,
-same thread count, same library versions* — that is a verified round-trip, not a portable
-format. Making it one is the [int8 determinism task](Long_Time_Tests.md).
+The verified figure is **0.940 bpb / 17,873 B**, against the batched path's 17,846 B. Two
+things follow, and the second matters more than the first:
+
+1. **The batched measurement was honest** — 27 bytes, 0.15%. It was never decodable, but it
+   was not inflated either. A prediction that survived contact.
+2. **"Verified" still means *same machine, same thread count, same library versions*.** It
+   is a verified round-trip, not a portable format, and no amount of further running fixes
+   that. Making it portable is the [int8 determinism task](Long_Time_Tests.md).
+
+The run also reported 30 B/s encode and 42 B/s decode. **Disregard both** — unrelated `xz`
+benchmarking was running on the same machine through the decode half, which is trap 6 in
+`handoff.md`, committed by the person who wrote trap 6. Ratios are deterministic and
+unaffected; throughput measured under contention is fiction.
 
 ### And the number that keeps the 8.5× honest
 
@@ -278,9 +290,9 @@ pays that storage bill.
 
 | target | best existing | with our work | gain | effort |
 |---|---:|---:|---:|---|
-| **OCI / Docker layer** | 29,780,905 (gzip, as shipped) | **20,164,715** (zstd -19) | **−32.3%** | **zero code** |
-| **SQL dump**, narrow columns | 102,532 (`xz -9`) | **84,256** (transform + xz) | **−17.8%** | ~120 lines, lossless |
-| **SQLite**, page grouping | 2,088,376 (`xz -9`) | 2,079,612 | −0.4% | dead end |
+| **OCI / Docker layer** | 29,780,905 (gzip, as shipped) | **19,383,787** (zstd -19 --long) | **−34.9%** | **zero code** |
+| **SQL dump**, narrow columns | 102,532 (`xz -9`) | **73,252** (transform + xz) | **−28.6%** | ~240 lines, lossless |
+| **SQLite**, page grouping | 2,088,376 (`xz -9`) | 2,077,660 | −0.5% | dead end |
 | SQL dump, one blob column | 1,910,312 (`xz -9`) | 1,908,248 | −0.1% | n/a |
 
 ### The Docker result needed no invention
@@ -292,18 +304,29 @@ A real `python:3.12-slim` layer from Docker Hub. Re-encoding the *identical* tar
 | as shipped (gzip) | 29,780,905 | — |
 | gzip -9 *(sanity check — confirms the shipped blob is max-ish gzip)* | 29,796,986 | +0.05% |
 | bz2 -9 | 25,748,725 | −13.5% |
-| **zstd -19** | **20,164,715** | **−32.3%** |
+| zstd -19 | 20,164,715 | −32.3% |
+| **zstd -19 `--long=27`** | **19,383,787** | **−34.9%** |
 | xz -9 | 17,782,292 | −40.3% |
+| xz -9 + x86 BCJ filter | 17,286,776 | −42.0% |
 
 **Mechanism: gzip's 32 KB window.** The tar is 81 MB across **3,260 members** — shared
 strings across Python's stdlib, repeated ELF patterns, duplicated headers. `xz`'s 64 MB
 window sees all of it; gzip structurally cannot look past 32 KB. An architectural limit,
 not a modelling one.
 
-`zstd` is **already a legal OCI layer media type**, so the 32.3% is deployable with a
-config change. `xz` would need a new media type, so treat 40.3% as the ceiling rather than
-the offer. Note this is a **re-encode** — identical tar content, different digest — not a
-byte-lossless transform of the original blob.
+**Two flags do the rest of the work.** `--long=27` gives zstd a 128 MB window with
+long-distance matching — and 27 is exactly the decoder's own default window limit, so the
+frame still decodes everywhere and it stays the same media type. It is also *faster* than
+plain `-19` here (25.6 s vs 42.4 s), so it is strictly better on both axes. Going further
+to `-22 --ultra` buys only 0.9% more for ~3× the time: tested, rejected.
+
+For `xz`, the x86 BCJ filter converts relative branch targets to absolute ones — worth
+another 2.8% on a tar that is ~25% ELF.
+
+`zstd` is **already a legal OCI layer media type**, so **−34.9% is deployable with a config
+change**. `xz` would need a new one, so treat −42.0% as the format-unconstrained ceiling
+rather than the offer. Note this is a **re-encode** — identical tar content, different
+digest — not a byte-lossless transform of the original blob.
 
 ### The SQL dump transform works, and only on one shape
 
@@ -311,21 +334,72 @@ byte-lossless transform of the original blob.
 beside a title beside an integer — three distributions interleaved, the worst case for any
 entropy coder. Round-trip is asserted byte-for-byte on every run.
 
-| file | shape | `xz -9` | + transform | gain |
-|---|---|---:|---:|---:|
-| chinook.sql | real relational schema, many narrow columns | 102,532 | **84,256** | **−17.8%** |
-| wiki_meta.sql | 6 narrow columns, real data | 99,188 | **85,044** | **−14.3%** |
-| wiki.sql | one dominant TEXT column | 1,910,312 | 1,908,248 | −0.1% |
+| file | shape | `xz -9` | regroup only | + value re-spelling | gain |
+|---|---|---:|---:|---:|---:|
+| chinook.sql | real relational schema, many narrow columns | 102,532 | 84,256 | **73,252** | **−28.6%** |
+| wiki_meta.sql | 6 narrow columns, real data | 99,188 | 85,044 | **77,212** | **−22.2%** |
+| wiki.sql | one dominant TEXT column | 1,910,312 | 1,908,248 | 1,906,140 | −0.2% |
 
-Those last two rows are the *same real rows* — `wiki_meta` is `wiki` with the body column
-dropped. That's the controlled test: **value depends on table shape, not size.** When one
-blob column *is* the file, the data is already effectively columnar and there is nothing
-to regroup.
+Those first two rows are the shape argument: **value depends on table shape, not size.**
+
+⚠️ **The wiki.sql row is not the evidence it looks like.** A 2026-07-31 audit found that
+only 1,176 of its 68,576 lines match the INSERT parser — SQLite's `.dump` emits string
+values containing raw newlines, and the parser is line-based, so **97.7% of that file
+never reaches the transform at all**. It measures parser coverage, not columnar failure.
+`wiki_meta` (the same rows with the body column dropped) remains a valid controlled test;
+wiki.sql is pending statement-level parsing.
+
+#### Most of the win was in how the values were spelled
+
+Regrouping alone got chinook to −17.8%. The rest came from noticing that decimal ASCII is
+the worst case for the coder *twice over*, in two different ways that want opposite fixes:
+
+- an **ID column** is a ramp — `3501,3502,3503` shares almost no bytes with its neighbour,
+  so the coder re-learns the counter every row. Delta turns it into a column of `1`s.
+- a **wide value column** (file sizes, timestamps) mixes a slow-moving high digit with a
+  random low digit in one byte stream. Byte-plane transposition splits them, so the high
+  plane compresses hard and the noise is quarantined in the low one.
+
+Neither wins everywhere, and the loser is not close — measured per column with `xz`:
+
+| column | ASCII | delta | planes | delta+planes |
+|---|---:|---:|---:|---:|
+| `Track.0` — monotonic id | 1,431 | **45** | 328 | 66 |
+| `InvoiceLine.2` | 2,272 | **69** | 1,232 | 112 |
+| `Track.7` — file sizes | 13,209 | 13,239 | **10,678** | 11,200 |
+| `revision.5` | 9,999 | 11,594 | **8,510** | 9,992 |
+| `revision.0` | 2,307 | 828 | 1,663 | **823** |
+
+So the transform doesn't predict which encoding wins — it **tries every spelling per column
+with a cheap proxy codec and stores the winner in a one-token header**. Picking by rule
+instead would have mis-called `revision.4` and `Track.4`, where plain ASCII beats both
+clever encodings.
+
+**The same trick then works on a string column.** An ISO-8601 timestamp — `'2005-12-27T18:46:47Z'`
+— is 22 bytes spelling a number that fits in four. Parsing to epoch seconds and reusing the
+byte-plane path takes `wiki_meta`'s `revision.2` from 20,824 to 16,092 bytes, which is **5.8%
+of that file's entire output** and moves its headline from −17.4% to −22.2%:
+
+| `revision.2` | ASCII | epoch ASCII | epoch delta | epoch planes | epoch delta+planes |
+|---|---:|---:|---:|---:|---:|
+| xz -9 bytes | 20,824 | 17,812 | 18,848 | **16,092** | 16,816 |
+
+Losslessness is not assumed: a candidate value must re-render byte-exactly from its epoch
+integer or the column falls back. A string like `'0000-99-99T99:99:99Z'` matches the shape
+and is not a date, so it fails the gate rather than corrupting — `selfcheck()` asserts it.
+
+**A flag got there first, and then stopped mattering.** Before the int encoding, tuning
+`xz`'s `pb=0 lc=4` was worth 1.9 points on its own (17.8% → 19.7%) — consistent with Part
+2's other lesson that a codec flag beats an afternoon of code. After the int encoding the
+same flags are worth 0.4 points, and they shrink the plain baseline by about as much, so
+the honest same-config gain doesn't move. Both were fixing one thing: decimal digits
+sitting misaligned against the coder's position bits. Fixed properly, the flag has nothing
+left to do. Not shipped.
 
 ### SQLite page grouping is a dead end
 
 `shapes/sqlitepages.py` sorts pages by b-tree kind, keeping a permutation so it reverses
-exactly. Worth 0.4–4.0%. The page census says why: `wiki.db` is **2,830 leaf-table pages
+exactly. Worth 0.5–4.1%. The page census says why: `wiki.db` is **2,830 leaf-table pages
 out of 2,913**, so "group by kind" has one kind to work with, and freshly built databases
 have no free pages to gather.
 
@@ -375,7 +449,7 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | SSE/APM will help, as it does in every serious CM compressor | **refuted** | Neutral at 25% weight, harmful at 75%. Nothing to recalibrate. |
 | batched teacher-forced encoding is a free 16× speedup | **partial** | 16× faster, byte-identical output — but the stream does **not** decode with the sequential decoder. Diverged at byte 253. |
 | the first 256 KB of enwik8 is a representative sample | **refuted** | 0.811 there vs 0.917 mid-file. XML preamble, 13% bias. |
-| grouping SQLite pages by b-tree kind will help — the kinds have very different byte character | **refuted** | 0.4–4.0%. Real databases are overwhelmingly one kind (2,830 of 2,913 leaf-table), and fresh ones have no free pages to gather. |
+| grouping SQLite pages by b-tree kind will help — the kinds have very different byte character | **refuted** | 0.5–4.1%. Real databases are overwhelmingly one kind (2,830 of 2,913 leaf-table), and fresh ones have no free pages to gather. |
 | the Docker layer opportunity needs a clever transform | **inverted — it needed no code** | Re-encoding the identical tar with `zstd -19` saves 32.3%. The win was a codec default. |
 
 Two instrument bugs were also caught by sanity checks rather than by luck: a
@@ -388,18 +462,23 @@ instrument than a discovery.**
 
 ## Caveats, read these
 
-1. **The 0.939 headline was never decompressed.** It comes from `compress_batched`,
-   which is 16× faster and produced byte-identical output on our test sample — but its
-   stream does not round-trip through the sequential decoder, because batched and
-   single-token GEMMs reduce floats in a different order. Treat it as a **measured
-   entropy**, not a demonstrated codec. The sequential path *is* round-trip verified.
+1. **The headline is verified, but only on one machine.** The whole of `alice29.txt`
+   round-trips through the sequential path at 0.940 bpb. What that does *not* buy is
+   portability: decoding needs the same machine, thread count and library versions, because
+   float reduction order changes the probabilities. The same effect is why
+   `compress_batched` — 16× faster, and the source of the old 0.939 figure — produces a
+   stream the sequential decoder cannot read. It was faithful as a measurement (0.15% from
+   the verified figure); it was never a codec.
 2. **`llm_ptc` is text-only.** It calls `.decode('utf-8')` and rejects binary outright.
    `ptc.py` is unconditionally lossless on arbitrary bytes; `llm_ptc` is not.
 3. **Nothing here is cross-machine reproducible.** Float reduction order depends on
    thread count and library version. Real systems (ts_zip) solve this with quantised
    integer inference. We don't, yet — and we proved why it matters by breaking it.
-4. **Decompression cannot be batched.** It's inherently sequential at ~69 B/s. Every
-   *read* of a 152 KB file takes ~37 minutes. Compression being fast doesn't help.
+4. **Decompression cannot be batched — within one stream.** It is inherently sequential
+   at ~85 B/s, so every *read* of a 152 KB file takes ~30 minutes. Compression being fast
+   doesn't help. Across several independent streams advanced in lockstep it *could* be
+   batched, which is the one untested idea that would change this without solving
+   determinism first.
 5. **Model size is not counted in the bpb figures.** 272 MB is only free where both ends
    already have the model. Add it and every number here loses to `gzip` on any file
    under a few hundred megabytes.
@@ -441,7 +520,7 @@ python probe.py corpus/alice29.txt 4096            # coder overhead + context sw
 # Part 2 - format-aware transforms, no model, seconds not hours
 python scripts/fetch_shape_data.py                 # real Docker layer + SQLite + dumps
 python shapes/baseline.py                          # what zstd/xz already achieve
-python shapes/sqldump.py shapes/data/chinook.sql   # the 17.8% win, round-trip asserted
+python shapes/sqldump.py shapes/data/chinook.sql   # the 28.6% win, round-trip asserted
 python shapes/sqlitepages.py shapes/data/wiki.db   # the dead end, for the record
 
 python scripts/make_charts.py                      # regenerate charts from results.json
@@ -449,8 +528,22 @@ python scripts/make_charts.py                      # regenerate charts from resu
 
 Tunables are environment variables, all documented at the top of `llm_ptc.py`:
 `LLM_PTC_MODEL`, `LLM_PTC_LIMIT`, `LLM_PTC_ORDERS`, `LLM_PTC_APM`, `LLM_PTC_DTYPE`,
-`LLM_PTC_THREADS`. Defaults are the measured optimum, with the losing configurations
+`LLM_PTC_THREADS`. Most defaults are a measured optimum, with the losing configurations
 recorded in comments so nobody re-runs them.
+
+**One of them was not, and it is the most useful thing in this section.** `LLM_PTC_THREADS`
+defaulted to `os.cpu_count()` — inherited, never swept, and described here as "the measured
+optimum" for months. Sweeping it found it was the **slowest** setting tested:
+
+| threads | 20 | 10 | 8 | 6 | 4 |
+|---|---:|---:|---:|---:|---:|
+| sequential encode | 42 B/s | 82 | 86 | **87** | 83 |
+
+A single-token step is ~210 tiny GEMVs, one parallel region each, on a memory-bandwidth-bound
+workload — so past ~6 threads you buy fork-join barriers, not throughput. **2.07× on both
+encode and decode, for a one-line change**, paid on every run this project ever made. The
+batched path has the *opposite* optimum (it is one big GEMM per window, so it wants every
+core), and the two defaults are now set separately.
 
 Every measurement lives in [`results/results.json`](results/results.json); the charts
 are generated from it.
@@ -474,7 +567,9 @@ The measurements this repo *hasn't* made are tracked in
 **[Long_Time_Tests.md](Long_Time_Tests.md)** — what each one buys, what it costs in wall
 clock, and the order to do them in. The short version:
 
-- **~75 min** proves the 0.939 headline is genuinely lossless (caveat #1 above).
+- ~~**~75 min** proves the headline is genuinely lossless~~ — **done**, 0.940 bpb,
+  `round-trip: ok`. It took closer to 3 hours; see trap 3 in `handoff.md` on why the
+  estimate was wrong.
 - **~26 hours** turns the ts_zip enwik8 comparison from an extrapolation into a measurement.
 - **~17 days** would be a verified full-enwik8 round-trip, which is why deterministic
   integer inference is the one engineering task that matters more than any run.

@@ -20,7 +20,7 @@ itself against published figures before reporting anything.
 ## The honest state, up front
 
 **This is a well-measured reproduction, not a contribution.** `llm_ptc` rebuilds what
-ts_zip shipped in 2023; our 17.8% margin over it is a *model-vintage artifact* (we used a
+ts_zip shipped in 2023; our 17.7% margin over it is a *model-vintage artifact* (we used a
 2024 model against their 2023 one), not an algorithmic advance. Nothing here is novel.
 
 **What is genuinely worth keeping** is the method and the negative results: a harness that
@@ -30,6 +30,10 @@ measurements, and two instrument bugs caught by sanity checks rather than luck.
 **Effort-to-result is humbling and worth internalising before you plan work:** swapping the
 model was worth **45%**; every hand-built modelling improvement combined is worth about
 **1%**; and in Part 2 a *codec flag* beat an afternoon of transform code, 32% to 18%.
+The SQL transform later closed that gap (18% → **28.6%**) by fixing how *values are spelled*
+— integers first, then ISO-8601 timestamps as epoch seconds — but note the shape of it: the
+win came from *measuring per column and storing the winner*, not from picking a cleverer
+encoding. Same mechanism, three different value types, no new theory.
 
 ## What works, and what is merely measured
 
@@ -37,28 +41,34 @@ model was worth **45%**; every hand-built modelling improvement combined is wort
 |---|---|
 | `ptc.py` lossless on arbitrary bytes incl. binary, up to 1,029,744 B | **verified** |
 | `ptc.py` → 3.1× on text (2.606 bpb) | **verified** |
-| `llm_ptc` → 8.5× on alice29 (0.939 bpb) | **measured, not decoded** — see below |
-| `llm_ptc` round-trip | **verified only to 4,096 B** |
-| SQL dump transform → −17.8% vs `xz` | **verified**, round-trip asserted every run |
-| SQLite page grouping → −0.4% | verified, and a **dead end** |
-| OCI layer → −32.3% | **re-encode**, not byte-lossless. Identical tar, new digest. |
+| `llm_ptc` → 8.5× on alice29 (0.940 bpb) | **verified** — full-file sequential round-trip |
+| `llm_ptc` round-trip | **verified to 152,089 B**, one machine only — see below |
+| SQL dump transform → −28.6% chinook / −22.2% wiki_meta | **verified**, round-trip asserted every run, plus a `selfcheck()` over 12 dump shapes |
+| SQLite page grouping → −0.5% | verified, and a **dead end** |
+| OCI layer → −34.9% (`zstd -19 --long=27`) | **re-encode**, not byte-lossless. Identical tar, new digest. |
 | enwik8 → 0.917 bpb | 262 KB slice only. Full-file figures are **extrapolations**. |
 
-**The 8.5× headline came from `compress_batched`, which has never been decoded.** It is 16×
-faster and produced byte-identical output on an 8 KB sample, but its stream does **not**
-round-trip through the sequential decoder (diverges at byte 253 — batched and single-token
-GEMMs reduce floats in a different order). Treat 0.939 as a measured entropy.
+**`compress_batched` still has never been decoded, and the headline no longer depends on
+it.** It is 16× faster and produced byte-identical output on an 8 KB sample, but its stream
+does **not** round-trip through the sequential decoder (diverges at byte 253 — batched and
+single-token GEMMs reduce floats in a different order). Keep it for measurement, not output.
 
-## In flight right now
+## The verification landed
 
-A full sequential encode+decode of `alice29.txt` (task `bzdrzq9j0`, pid 5428). At the time
-of writing: encode 40,000/41,933 tokens, tracking **0.935 bpb** — which matches the batched
-0.939 closely and suggests the batched path is faithful. The decode half prints nothing, so
-silence is expected, not a hang.
+Done, 2026-07-31: a full sequential encode **and decode** of `alice29.txt` (task
+`bzdrzq9j0`, pid 5428, ~3 hours) returned `round-trip: ok` at **0.940 bpb / 17,873 B**.
+The README headline, charts and `results/results.json` were updated to the verified figure
+and item **D.4** is closed.
 
-**When it finishes:** if `round-trip: ok`, update `results/results.json`, regenerate charts,
-and close item **D.4** in `Long_Time_Tests.md` — the README headline is currently the
-*pre-match-model* figure and is not reproducible with the shipped defaults.
+Three things to carry forward:
+
+- **The batched path was faithful** — 27 bytes, 0.15% from the verified figure. It was
+  never decodable, but it was not inflating anything either.
+- **Verified ≠ portable.** Same machine, same thread count, same library versions. The next
+  real step is still deterministic int8 inference (item 4.1), not another long run.
+- **Ignore the 30 B/s encode / 42 B/s decode it printed.** Heavy `xz`/`zstd` benchmarking
+  ran on this machine through the decode half — trap 6 below, committed *again*, by the
+  person who wrote trap 6. The bpb is deterministic and unaffected.
 
 ## Traps that will bite you
 
@@ -84,6 +94,14 @@ These all cost me real time. They are the most valuable part of this document.
 8. **SSE/APM and extra match orders are already tested and rejected.** Neutral to harmful
    against a well-calibrated LLM. Losing configs are recorded in comments next to `ORDERS`
    in `llm_ptc.py`. Don't re-run them.
+9. **A default is not a measurement.** The thread count was `os.cpu_count()` from day one and
+   the README called the defaults "the measured optimum". It had never been swept, and it was
+   the **slowest** of five settings — 42 B/s vs 87 at 6 threads. Every encode and decode in
+   this project's history, including the 3-hour full-file verification, paid 2.07× for it.
+   Anything you inherited rather than measured is a candidate.
+10. **A speedup measured as "run A, then run B" is measuring cache state.** The audit's
+   1.35×/1.41× `ptc` rewrite measured **1.00×/1.07×** when re-run interleaved (A,B,A,B) on an
+   idle box, and was reverted. Interleave, take fastest-of-N, and run nothing else.
 
 ## Hard rules for this repo
 
@@ -113,7 +131,7 @@ python scripts/fetch_shape_data.py    # Docker layer, SQLite dbs, SQL dumps
 
 python bench.py                       # ~2 min. Confirms harness reproduces published xz.
 python shapes/baseline.py sql         # seconds. Part 2 baselines.
-python shapes/sqldump.py shapes/data/chinook.sql    # the 17.8% win
+python shapes/sqldump.py shapes/data/chinook.sql    # the 28.6% win
 
 export LLM_PTC_MODEL=HuggingFaceTB/SmolLM2-135M
 python llm_ptc.py corpus/alice29.txt 4096           # ~2 min, round-trip verified
@@ -138,19 +156,35 @@ All in `results/results.json` with numbers; the short version:
   Worth ~0 against well-calibrated SmolLM2.
 - **Context length is worth ~0% for GPT-2 and +3% for SmolLM2.** Don't assume from one model.
 - **Columnar regrouping is the transferable win**, and it materialises only where you can
-  *reach* the fields: plain text in a SQL dump (14–18%), unreachable behind SQLite's binary
-  record format (0.4%).
+  *reach* the fields: plain text in a SQL dump (14–18% from the regrouping alone),
+  unreachable behind SQLite's binary record format (0.4%). Regrouping is the smaller half —
+  re-spelling *values* (delta for ID ramps, byte-planes for wide numbers, epoch seconds for
+  ISO-8601 timestamps, picked per column) took chinook 17.8% → 28.6% and wiki_meta
+  17.4% → 22.2% with no change to the grouping.
+- **Don't predict which encoding wins; measure it.** Delta beats byte-planes 45 B to
+  328 B on a monotonic ID column and loses 11,594 to 8,510 on a wide value column, and
+  plain ASCII beats both on some. A rule would mis-call the columns where they're close.
+- **The wiki.sql −0.1% never tested the hypothesis it was cited for.** Only 1,176 of 68,576
+  lines match the line-based INSERT parser (SQLite `.dump` emits raw newlines inside string
+  values), so 97.7% of the file bypasses the transform entirely. `wiki_meta` is the valid
+  controlled test; wiki.sql is a parser-coverage measurement wearing a shape-argument label.
 - **The Hutter Prize is structurally closed to pretrained models** — entrants are charged
   for the decompressor, so a 272 MB model can't chase a 110 MB record. Only online-trained
   models qualify. Don't plan around it; I wasted several planning cycles before checking.
 
 ## What to do next
 
-`Long_Time_Tests.md` has everything costed and ordered. The three that matter:
+`Long_Time_Tests.md` has everything costed and ordered. With D.4 closed, the three that matter:
 
-1. **Finish/confirm the in-flight verification** (D.4) — closes the biggest credibility gap.
-2. **Record-level SQLite columnarisation** (item 4.4) — the only Part 2 follow-up with a
-   *proven* mechanism behind it. Days of work.
+1. **Multi-stream lockstep decode** (item 4.6) — new, and now the best-value item on the
+   list. A scratch pilot already round-trips byte-exactly at S=4/8/16 with **2.5–8.8× decode**,
+   and the ratio cost falls with segment length (8.9% at 560-token segments, 2.6% at 2,221),
+   so it is close to free on large files. This is what makes a full-enwik8 *verified*
+   round-trip feasible without solving int8 determinism first.
+2. **Record-level SQLite columnarisation** (item 4.4) — rescoped: OLTP-shaped dbs only
+   (~10% ceiling; wiki.db's is ~0.1%), and build the churn fixture first, because all three
+   sample dbs have zero freeblocks/overflow/stale bytes and cannot catch a rebuild bug.
+   `encode_col` is reusable as-is, and rowid ramps are exactly what delta is for.
 3. **Deterministic int8 inference** (item 4.1) — the sole path from "measurement demo" to
    "working codec". Collapses a 17-day verified round-trip to ~2 hours and makes
    cross-machine decompression possible.

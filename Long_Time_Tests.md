@@ -9,29 +9,43 @@ SmolLM2-135M, float32). Scale them if you run elsewhere.
 | path | measured | notes |
 |---|---:|---|
 | `llm_ptc` batched encode | **~1,050 B/s** | one forward per window; the fast path |
-| `llm_ptc` sequential encode | ~70 B/s | one forward per token |
-| `llm_ptc` sequential decode | ~65 B/s | **cannot be batched, ever** — needs token N to predict N+1 |
+| `llm_ptc` sequential encode | ~87 B/s | one forward per token |
+| `llm_ptc` sequential decode | ~85 B/s | needs token N to predict N+1 — but see the lockstep note |
 | `ptc` (pure maths) | ~24 KB/s | pure Python |
 | Qwen3-0.6B | ~23 B/s | 4.4× the params, ~15× slower than SmolLM2 batched |
 
+> ⚠️ **Every estimate below was computed at ~70 B/s and is now ~20% pessimistic.**
+> The 2026-07-31 audit found the thread-count default (`os.cpu_count()` = 20) was the
+> *slowest* of five settings for the sequential path — 42 B/s vs 87 at 6 threads, a 2.07×
+> penalty paid on every encode and decode since the project began. Defaults are now set
+> per-path (6 for sequential, all cores for batched, which has the opposite optimum).
+> Divide the sequential wall-clock numbers below by ~2 where they were derived from the
+> old rate; they have not all been recomputed.
+
 > **The asymmetry that dominates this whole file:** encoding parallelises because the
-> token sequence is already known. Decoding cannot. Any test needing a verified
-> round-trip costs ~16× more than the same test measuring ratio only.
+> token sequence is already known. Decoding cannot — *within one stream*. Across several
+> independent streams advanced in lockstep it can, which is the one idea in this file
+> that would change Tier 3 without solving 4.1. See 4.6.
 
 ---
 
 ## Tier 1 — worth doing first (1–2 hours each)
 
-### 1.1 Prove the headline is actually lossless — **~75 min** ⭐ highest value per hour
-The published 0.939 bpb on `alice29.txt` came from the batched encoder and **was never
-decompressed**. This is the single biggest credibility gap in the repo.
-
+### ~~1.1 Prove the headline is actually lossless~~ — **done 2026-07-31**
 ```bash
 export LLM_PTC_MODEL=HuggingFaceTB/SmolLM2-135M
 python llm_ptc.py corpus/alice29.txt 152089        # sequential, encode AND decode
 ```
-- **Buys:** turns caveat #1 in the README into a verified result. ~37 min encode + ~37 min decode.
-- **Expect:** 0.939 ± 0.002 and `round-trip: ok`. If the bpb differs materially from the batched figure, the batched path is a worse approximation than the 8 KB test suggested — which is itself worth knowing.
+**Result: `round-trip: ok`, 17,873 B, 0.940 bpb.** Prediction was 0.939 ± 0.002; it landed
+inside, so the batched path is a faithful approximation (0.15%) and stays usable for
+ratio-only runs. The README, charts and `results.json` now quote the verified figure.
+
+Two corrections to this entry's own estimates, worth keeping visible:
+- **~75 min was wrong; it took ~3 hours.** The estimate came from small-sample throughput,
+  where the context window is mostly empty. See trap 3 in `handoff.md`.
+- **Decode is not the mirror of encode in cost**, and the run's own 30/42 B/s figures can't
+  settle it — unrelated benchmarking was running on the machine at the time. Anyone wanting
+  that number needs a quiet box.
 
 ### 1.2 Trend check before committing to enwik8 — **~1 hour**
 We have 0.917 bpb on a 262 KB slice and are extrapolating to a 100 MB claim across
@@ -70,6 +84,7 @@ LLM_PTC_MODEL=HuggingFaceTB/SmolLM2-360M python llm_ptc.py corpus/alice29.txt 15
 ```
 - **Buys:** the cheapest remaining ratio gain. 2.7× params, expect ~2.5× slower.
 - **Watch:** whether it beats 0.939 by more than it costs in speed. 135M already beat a 600M model, so bigger is *not* guaranteed better here.
+- **Compare against 0.939, not the 0.940 headline.** That command runs `batch`, so the batched 135M figure is the like-for-like baseline. Mixing the two paths manufactures a 0.001 bpb difference that is the encoder, not the model.
 
 ### 1.5 book1 and the rest of the corpus — **~15 min** each
 `llm_ptc` has only ever been measured on alice29, post2026 and enwik8 slices. `book1` has
@@ -128,6 +143,21 @@ thread count or library version. This is the load-bearing choice in ts_zip's des
 we proved why by breaking it: our batched stream diverged from the sequential decoder at
 **byte 253**.
 
+⚠️ **Do not start with `torch.ao.quantization.quantize_dynamic`** — audited 2026-07-31 and
+it cannot deliver either half of what this item needs:
+- **Not deterministic.** It computes activation scales *per batch at runtime*, so the same
+  row gives different outputs alone vs inside a batch — reproduced in under 10 s on a toy
+  `nn.Linear` stack: max abs diff **0.067**, `torch.equal` False. That is the exact failure
+  class that broke `compress_batched`, surviving quantisation untouched.
+- **Not faster here.** This torch ships only the `onednn` quantized engine (no fbgemm), and
+  its dynamic-quant linear at M=1 does not parallelise — it gets *slower* with more threads.
+  Best int8 measured ~1.0–1.15× over tuned fp32, and it loses at every multithreaded setting.
+
+What the requirement actually implies: **static, export-time activation scales**, integer
+accumulation, and fixed-point softmax/RMSNorm/RoPE — i.e. pinned custom kernels, which is
+what ts_zip and NNCP ship. Weeks, not days. Before committing to that, price it against
+**4.6**, which buys most of the same wall-clock win with none of the kernel work.
+
 Unblocks, all at once:
 - the 16× batched path becomes a **valid codec**, not just a measurement → 3.1 becomes ~2 hours instead of 17 days
 - cross-machine decompression, i.e. the thing that makes it a real format
@@ -146,9 +176,33 @@ currency you buy ratio with — a faster inner loop affords a bigger model in th
 clock. **Not before the format is stable**; hand-tuning a moving target is the waste.
 
 ### 4.4 Record-level columnarisation for SQLite ⭐ the Part 2 follow-up
-Page-kind grouping measured 0.4–4.0% and is a dead end. But the *same* columnar mechanism
-gave **14–18%** on SQL dumps, and the only reason it fails on SQLite is that the fields sit
+Page-kind grouping measured 0.5–4.1% and is a dead end. But the *same* columnar mechanism
+gave **17–28%** on SQL dumps, and the only reason it fails on SQLite is that the fields sit
 behind a binary record format instead of in plain text.
+
+⚠️ **Rescoped by the audit: do not target `wiki.db`.** Leaf-cell payload is 90% of its
+compressed size but it is one TEXT column, so the ceiling there is ~0.1%. The dbs where
+dump-level columnarisation paid have payload as a *minority* of bytes (chinook.db: 36% raw,
+indexes alone 47%), putting the honest ceiling at **~10%** over page-sorted zstd, on
+OLTP-shaped databases only.
+
+⚠️ **Build the churn fixture first.** All three sample dbs are freshly imported and contain
+**zero** freeblocks, zero overflow cells and zero stale bytes in unallocated gaps. Every
+hard byte-exact-rebuild path is therefore unexercised: a columnariser that gets the overflow
+spill formula, freeblock contents or stale-gap preservation wrong will pass every round-trip
+assert here and corrupt the first real database with delete/update history. Generate a db
+with mixed INSERT/DELETE/UPDATE, no VACUUM, and rows over 4061 B, and assert against that.
+
+A cheaper intermediate step exists: parse leaf cells **read-only** (no rebuild risk) and
+compress the index-page group with the payload as a zstd dictionary. Measured −15.7% on
+wiki_meta.db's index pages, ~3.8% of the file — pays only where indexes are text keys.
+
+The upside here grew: on dumps, per-column value re-spelling was worth more than the
+regrouping itself (17.8% → 28.6% on chinook, and 17.4% → 22.2% on wiki_meta). SQLite already stores ints as binary rather than decimal
+ASCII, so the *planes* half of that win is partly pre-collected — but the *delta* half is
+not, and rowid/foreign-key ramps are exactly what a b-tree is full of. Reuse `encode_col`
+directly once the fields are reachable; it takes a list of byte values and needs nothing
+SQL-specific.
 
 The work: parse cells inside leaf-table pages, split record payloads column-major, and
 keep enough page metadata (cell pointer array, free blocks, overflow chains) to rebuild
@@ -159,6 +213,63 @@ unrecoverable from the rows.
 Worth doing because the mechanism is now proven rather than hypothesised, and SQLite is one
 of the highest-volume structured formats on earth with no format-aware compressor. Days,
 not hours.
+
+### 4.6 Multi-stream lockstep decode ⭐ the cheap alternative to 4.1
+**PILOT BUILT AND RUN, 2026-07-31 — mechanism confirmed, cost not yet priced.**
+"Decoding cannot be batched" is true *within* one stream and false *across*
+streams. Split the token sequence into S segments, give each its own KV cache, match bank
+and mixer, and advance all S by one token per step in a single `[S,1]` forward.
+
+Why it stays lossless where `compress_batched` did not: the encoder runs the **same
+step-major loop** as the decoder, so both sides execute identical batched GEMMs in
+identical order. The divergence at byte 253 came from encoder and decoder using *different*
+batch shapes; here they use the same one.
+
+- **Buys:** ~5–10× on decode *and* on encode-of-a-decodable-stream at S=16–64. Traffic model
+  at ctx 1024, S=16: (540 MB weights + 16×47 MB KV)/16 tokens ≈ 81 MB/token vs 587 MB
+  sequential. That drops item **3.1 from ~17 days to ~2 days** without solving 4.1.
+- **Ratio cost:** S context restarts (measured as noise — see `negative_results`) plus lost
+  cross-segment matches. Bounded by the match model's total contribution, −1.2%.
+- **Format:** S and the segment lengths go in the header.
+**Pilot result** (scratch prototype, 8,185 B of alice29, byte-exact round-trip at every S):
+
+| S | bpb | decode | vs sequential |
+|---:|---:|---:|---|
+| 1 | 0.989 | 76 B/s | — |
+| 4 | 1.077 | 187 B/s | **2.5× decode, +8.9% size** |
+| 8 | 1.178 | 271 B/s | 3.6× decode, +19.1% size |
+| 16 | 1.350 | 672 B/s | 8.8× decode, +36.5% size |
+
+The speedup is real and lands in the predicted 5–10× band at S=16. **The ratio cost does
+not** — predicted <0.5%, measured 8.9–36.5%. It scales with S, which is the signature of a
+per-segment *cold start*, not of lost cross-segment matches: at 8 KB an S=16 segment is only
+~140 tokens, so each stream spends its whole life in the low-context regime the design exists
+to escape.
+
+The <0.5% prediction came from extrapolating "post-slide tokens cost the same as
+deep-in-window ones" — but that is about window *slides*, where the model still gets WINDOW
+tokens of context, not about starting from zero. (And that finding is itself now flagged; see
+`negative_results`.)
+
+**And the control confirms it.** Same S=4, same corpus, 4× the segment length:
+
+| sample | segment | sequential | lockstep S=4 | penalty |
+|---|---:|---:|---:|---:|
+| 8 KB | ~560 tok | 0.989 | 1.077 | +8.9% |
+| 32 KB | ~2,221 tok | 0.974 | 0.999 | **+2.6%** |
+
+4× the segment length cut the penalty **3.5×**. Lost cross-segment matches would not shrink
+that fast — so the cost is a function of **segment length, not of S**, and S is close to free
+once segments are long. That flips the recommendation: this is worth engineering, on files
+big enough to give long segments.
+
+- **Still unmeasured, deliberately:** enwik8 at S=16 gives ~1.7M-token segments, ~770× the
+  32 KB test, where the penalty should be far below 1%. Two points is a direction, not a
+  curve, and trap 3 in `handoff.md` is exactly about extrapolating this kind of thing. Run it
+  before quoting it.
+- **Also unresolved:** the pilot uses equal-length segments and drops the remainder. A real
+  implementation needs per-segment lengths in the header and streams that retire at different
+  steps without changing the batch shape mid-run.
 
 ### 4.5 2D contexts in `ptc` for images
 `ptc` loses to `xz` on `ptt5` (0.834 vs 0.655) because its contexts are 1-D while the
@@ -180,10 +291,10 @@ README does not currently draw that line. Add a table:
 | | largest verified round-trip | compression |
 |---|---:|---:|
 | `ptc.py` | 1,029,744 B, any bytes incl. binary | 3.1× |
-| `llm_ptc` + SmolLM2 | 4,096 B *(152,089 B pending 1.1)* | 7.9× *(8.5× pending)* |
+| `llm_ptc` + SmolLM2 | 152,089 B — whole of `alice29.txt` | 8.5× |
 
-The distinction readers care about: **3.1× is what you can rely on at real file sizes
-today; 8.5× is a measurement until 1.1 lands.**
+The distinction readers care about has since resolved in the good direction: 1.1 landed, so
+**8.5× is now a verified round-trip rather than a measurement** — on one machine.
 
 ### ~~D.2 The break-even line~~ — done
 Against `xz` we save ~0.2 bytes per input byte, so a 272 MB model repays itself after
@@ -195,10 +306,12 @@ Even after 1.1 passes, a verified round-trip holds only for the same machine, th
 count and library versions. That is not a format. Say so next to the headline, not only
 in caveat #3.
 
-### D.4 Re-point the headline at the shipped config
-The 0.939 figure was measured **before** the match model and mixer existed, so it is not
-reproducible with today's defaults. Task 1.1 produces the canonical replacement — update
-`results.json` and regenerate charts when it lands.
+### ~~D.4 Re-point the headline at the shipped config~~ — done
+The 0.939 figure predated the match model and mixer, so it was not reproducible with the
+shipped defaults. Task 1.1's **0.940 bpb / 17,873 B** replaced it across `results.json`,
+the charts and the README. Two hardcoded copies of the old numbers turned up during the
+swap — `chart_shapes` held `17.8` and `chart_speed_ratio` held `963, 0.939` — which is why
+"single source of truth" needs the charts to actually *read* the JSON. Both now do.
 
 ## Running these
 

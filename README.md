@@ -1,22 +1,21 @@
 # An honest lab for compression
 
-Two parts, one method: measure the incumbent properly, then find out whether there is
-anything left to win.
+One method: measure the incumbent properly, then find out whether there is anything left
+to win.
 
-- **Part 1 — beat the general compressors with a language model.** Two lossless
-  compressors sharing one arithmetic coder. Result: **0.940 bpb on alice29.txt**, 2.71×
-  smaller than `xz -9`, round-trip verified on the whole file. Real, and almost entirely
-  down to the *model* rather than to any of our engineering.
-- **Part 2 — beat them with structure instead.** Format-aware transforms on three real
-  targets. Result: the biggest available win needed **no algorithm at all**, and our best
-  transform was worth less than a codec flag.
+**Can a language model beat the general-purpose compressors?** Two lossless compressors
+sharing one arithmetic coder. Result: **0.940 bpb on `alice29.txt`**, 2.71× smaller than
+`xz -9`, round-trip verified on the whole file. Real, and almost entirely down to the
+*model* rather than to any of our engineering — which is the finding, not a disclaimer.
+
+The other half of this project asked whether *structure* can beat them instead, and now
+lives in **[sql-compression](https://github.com/BeForce1/sql-compression)**.
 
 **The code:**
 
 - **`ptc.py`** — pure context mixing. No weights, no training, no model file. ~250 lines of Python, lossless on arbitrary bytes.
 - **`llm_ptc.py`** — the same coder, driven by a pretrained language model plus a long-range match model, blended by a learned mixer.
 - **`bench.py`** — the harness. Verifies round-trip per row, reports bits per byte, and reproduces published `xz -9` numbers to three decimals so its other numbers can be trusted.
-- **`shapes/`** — Part 2: format-aware transforms, and the baselines that decide whether they were worth writing.
 
 Everything below was measured by this code on a laptop CPU with no GPU. Figures quoted
 from other people's work are labelled as such. **The negative results are the most useful
@@ -276,163 +275,22 @@ megabyte-scale duplicates while `ptc` tracks a single unverified match candidate
 
 ---
 
-# Part 2 — structure instead of a model
+# Part 2 lives in its own repo now
 
-A language model buys ratio at a catastrophic price in speed and portability. The other
-route is to exploit structure a general compressor *cannot see*: a cheap reversible
-transform, then a normal backend. Speed stays high, the decoder stays small and
-deterministic, no model ships.
+The format-aware transforms — SQL dumps, SQLite files, OCI layers — moved to
+**[sql-compression](https://github.com/BeForce1/sql-compression)** on 2026-08-01, with
+their measurements, their refutations and their git history. They shared a method with this
+repo and nothing else: no shared code, no shared data, and a name that described half the
+contents.
 
-Three real targets, picked for volume × how badly `zstd` handles them × whether anyone
-pays that storage bill.
+The comparison between the two halves is worth keeping in mind here, though, because it is
+the most useful thing either produced:
 
-![part 2 results](results/chart_shapes.svg)
-
-| target | best existing | with our work | gain | effort |
-|---|---:|---:|---:|---|
-| **OCI / Docker layer** | 29,780,905 (gzip, as shipped) | **19,383,787** (zstd -19 --long) | **−34.9%** | **zero code** |
-| **SQL dump**, narrow columns | 102,532 (`xz -9`) | **73,252** (transform + xz) | **−28.6%** | ~240 lines, lossless |
-| **SQLite**, page grouping | 2,088,376 (`xz -9`) | 2,077,660 | −0.5% | dead end |
-| SQL dump, one blob column | 1,910,312 (`xz -9`) | 1,908,248 | −0.1% | n/a |
-
-### The Docker result needed no invention
-
-A real `python:3.12-slim` layer from Docker Hub. Re-encoding the *identical* tar:
-
-| | size | vs shipped |
-|---|---:|---:|
-| as shipped (gzip) | 29,780,905 | — |
-| gzip -9 *(sanity check — confirms the shipped blob is max-ish gzip)* | 29,796,986 | +0.05% |
-| bz2 -9 | 25,748,725 | −13.5% |
-| zstd -19 | 20,164,715 | −32.3% |
-| **zstd -19 `--long=27`** | **19,383,787** | **−34.9%** |
-| xz -9 | 17,782,292 | −40.3% |
-| xz -9 + x86 BCJ filter | 17,286,776 | −42.0% |
-
-**Mechanism: gzip's 32 KB window.** The tar is 81 MB across **3,260 members** — shared
-strings across Python's stdlib, repeated ELF patterns, duplicated headers. `xz`'s 64 MB
-window sees all of it; gzip structurally cannot look past 32 KB. An architectural limit,
-not a modelling one.
-
-**Two flags do the rest of the work.** `--long=27` gives zstd a 128 MB window with
-long-distance matching — and 27 is exactly the decoder's own default window limit, so the
-frame still decodes everywhere and it stays the same media type. It is also *faster* than
-plain `-19` here (25.6 s vs 42.4 s), so it is strictly better on both axes. Going further
-to `-22 --ultra` buys only 0.9% more for ~3× the time: tested, rejected.
-
-For `xz`, the x86 BCJ filter converts relative branch targets to absolute ones — worth
-another 2.8% on a tar that is ~25% ELF.
-
-`zstd` is **already a legal OCI layer media type**, so **−34.9% is deployable with a config
-change**. `xz` would need a new one, so treat −42.0% as the format-unconstrained ceiling
-rather than the offer. Note this is a **re-encode** — identical tar content, different
-digest — not a byte-lossless transform of the original blob.
-
-### The SQL dump transform works, and only on one shape
-
-`shapes/sqldump.py` regroups a dump column-major. A dump stores rows, so a timestamp sits
-beside a title beside an integer — three distributions interleaved, the worst case for any
-entropy coder. Round-trip is asserted byte-for-byte on every run.
-
-| file | shape | `xz -9` | regroup only | + value re-spelling | gain |
-|---|---|---:|---:|---:|---:|
-| chinook.sql | real relational schema, many narrow columns | 102,532 | 84,256 | **73,252** | **−28.6%** |
-| wiki_meta.sql | 6 narrow columns, real data | 99,188 | 85,044 | **77,212** | **−22.2%** |
-| wiki.sql | one dominant TEXT column | 1,910,312 | 1,908,248 | 1,906,140 | −0.2% |
-
-Those first two rows are the shape argument: **value depends on table shape, not size.**
-
-⚠️ **The wiki.sql row is not the evidence it looks like.** A 2026-07-31 audit found that
-only 1,176 of its 68,576 lines match the INSERT parser — SQLite's `.dump` emits string
-values containing raw newlines, and the parser is line-based, so **97.7% of that file
-never reaches the transform at all**. It measures parser coverage, not columnar failure.
-`wiki_meta` (the same rows with the body column dropped) remains a valid controlled test;
-wiki.sql is pending statement-level parsing.
-
-#### Most of the win was in how the values were spelled
-
-Regrouping alone got chinook to −17.8%. The rest came from noticing that decimal ASCII is
-the worst case for the coder *twice over*, in two different ways that want opposite fixes:
-
-- an **ID column** is a ramp — `3501,3502,3503` shares almost no bytes with its neighbour,
-  so the coder re-learns the counter every row. Delta turns it into a column of `1`s.
-- a **wide value column** (file sizes, timestamps) mixes a slow-moving high digit with a
-  random low digit in one byte stream. Byte-plane transposition splits them, so the high
-  plane compresses hard and the noise is quarantined in the low one.
-
-Neither wins everywhere, and the loser is not close — measured per column with `xz`:
-
-| column | ASCII | delta | planes | delta+planes |
-|---|---:|---:|---:|---:|
-| `Track.0` — monotonic id | 1,431 | **45** | 328 | 66 |
-| `InvoiceLine.2` | 2,272 | **69** | 1,232 | 112 |
-| `Track.7` — file sizes | 13,209 | 13,239 | **10,678** | 11,200 |
-| `revision.5` | 9,999 | 11,594 | **8,510** | 9,992 |
-| `revision.0` | 2,307 | 828 | 1,663 | **823** |
-
-So the transform doesn't predict which encoding wins — it **tries every spelling per column
-with a cheap proxy codec and stores the winner in a one-token header**. Picking by rule
-instead would have mis-called `revision.4` and `Track.4`, where plain ASCII beats both
-clever encodings.
-
-**The same trick then works on a string column.** An ISO-8601 timestamp — `'2005-12-27T18:46:47Z'`
-— is 22 bytes spelling a number that fits in four. Parsing to epoch seconds and reusing the
-byte-plane path takes `wiki_meta`'s `revision.2` from 20,824 to 16,092 bytes, which is **5.8%
-of that file's entire output** and moves its headline from −17.4% to −22.2%:
-
-| `revision.2` | ASCII | epoch ASCII | epoch delta | epoch planes | epoch delta+planes |
-|---|---:|---:|---:|---:|---:|
-| xz -9 bytes | 20,824 | 17,812 | 18,848 | **16,092** | 16,816 |
-
-Losslessness is not assumed: a candidate value must re-render byte-exactly from its epoch
-integer or the column falls back. A string like `'0000-99-99T99:99:99Z'` matches the shape
-and is not a date, so it fails the gate rather than corrupting — `selfcheck()` asserts it.
-
-**A flag got there first, and then stopped mattering.** Before the int encoding, tuning
-`xz`'s `pb=0 lc=4` was worth 1.9 points on its own (17.8% → 19.7%) — consistent with Part
-2's other lesson that a codec flag beats an afternoon of code. After the int encoding the
-same flags are worth 0.4 points, and they shrink the plain baseline by about as much, so
-the honest same-config gain doesn't move. Both were fixing one thing: decimal digits
-sitting misaligned against the coder's position bits. Fixed properly, the flag has nothing
-left to do. Not shipped.
-
-### SQLite page grouping is a dead end
-
-`shapes/sqlitepages.py` sorts pages by b-tree kind, keeping a permutation so it reverses
-exactly. Worth 0.5–4.1%. The page census says why: `wiki.db` is **2,830 leaf-table pages
-out of 2,913**, so "group by kind" has one kind to work with, and freshly built databases
-have no free pages to gather.
-
-The two SQL results point the same direction: **the win is columnar regrouping of narrow
-typed fields, and it appears exactly when you can reach those fields.** In a dump they are
-plain text. Inside SQLite they sit behind a binary record format, so page shuffling cannot
-touch them. SQLite looked "wide open" because it is *hard*, not because nobody thought of
-it — and the mechanism is now proven on dumps rather than hypothesised.
-
-### Why not just build a faster, better zip?
-
-Because that corner is occupied, and our own benchmark says so. On alice29:
-
-| codec | speed | bits/byte |
-|---|---:|---:|
-| **bz2 -9** | **13.2 MB/s** | **2.272** |
-| `zlib -9` (zip) | 11.2 MB/s | 2.849 |
-| `xz -9` | 2.6 MB/s | 2.551 |
-| `ptc` (ours) | 0.023 MB/s | 2.606 |
-
-`bz2`, from 1996, is already both *faster* and 20% *better* than max-compression zip. And
-`ptc`'s ratio is already worse than `bz2`'s, so speed is not even our binding constraint.
-Context mixing is structurally ~100× slower than gzip in any language, because it runs an
-adaptive model per bit — a C port lands near `xz` ratio at worse speed, i.e. a worse
-`zstd`.
-
-### The uncomfortable conclusion
-
-The largest win across all three targets was not an algorithm, a transform, or a model. It
-was **not using gzip**. A flag change bought 32%; an afternoon of transform work bought 18%
-on one data shape; a page-level transform bought nothing.
-
-**Measure the incumbent's configuration before assuming you need to invent something.**
+| lever | worth |
+|---|---|
+| swapping the language model | **45%** |
+| every hand-built modelling improvement in this repo, combined | **~1%** |
+| a codec flag, over there | more than an afternoon of transform code |
 
 ---
 
@@ -517,12 +375,6 @@ python llm_ptc.py corpus/alice29.txt 152089 enc batch   # fast ratio measurement
 
 python probe.py corpus/alice29.txt 4096            # coder overhead + context sweep
 
-# Part 2 - format-aware transforms, no model, seconds not hours
-python scripts/fetch_shape_data.py                 # real Docker layer + SQLite + dumps
-python shapes/baseline.py                          # what zstd/xz already achieve
-python shapes/sqldump.py shapes/data/chinook.sql   # the 28.6% win, round-trip asserted
-python shapes/sqlitepages.py shapes/data/wiki.db   # the dead end, for the record
-
 python scripts/make_charts.py                      # regenerate charts from results.json
 ```
 
@@ -587,10 +439,7 @@ clock, and the order to do them in. The short version:
 | `scripts/fetch_corpus.py` | fetches and verifies all corpora. Nothing is redistributed. |
 | `handoff.md` | orientation, traps, hard rules, and open decisions. Read first. |
 | `Long_Time_Tests.md` | the multi-hour work not yet done, costed and ordered. |
-| `shapes/baseline.py` | what the existing tools already achieve on the Part 2 targets. |
-| `shapes/sqldump.py` | byte-lossless columnar transform for SQL dumps. |
-| `shapes/sqlitepages.py` | byte-lossless page-kind grouping for SQLite. The dead end, kept. |
-| `scripts/fetch_shape_data.py` | rebuilds the Part 2 test data. Nothing redistributed. |
+| `NEXT_STEPS.md` | where this stands after the 2026-08-01 audit, and what to do next. |
 | `scripts/make_charts.py` | regenerates the charts from the JSON. |
 
 ## References

@@ -175,44 +175,11 @@ worth 4–10×; the arithmetic coder is worth ~5%. Under a fixed time budget, sp
 currency you buy ratio with — a faster inner loop affords a bigger model in the same wall
 clock. **Not before the format is stable**; hand-tuning a moving target is the waste.
 
-### 4.4 Record-level columnarisation for SQLite ⭐ the Part 2 follow-up
-Page-kind grouping measured 0.5–4.1% and is a dead end. But the *same* columnar mechanism
-gave **17–28%** on SQL dumps, and the only reason it fails on SQLite is that the fields sit
-behind a binary record format instead of in plain text.
+### ~~4.4 Record-level columnarisation for SQLite~~ — moved
 
-⚠️ **Rescoped by the audit: do not target `wiki.db`.** Leaf-cell payload is 90% of its
-compressed size but it is one TEXT column, so the ceiling there is ~0.1%. The dbs where
-dump-level columnarisation paid have payload as a *minority* of bytes (chinook.db: 36% raw,
-indexes alone 47%), putting the honest ceiling at **~10%** over page-sorted zstd, on
-OLTP-shaped databases only.
-
-⚠️ **Build the churn fixture first.** All three sample dbs are freshly imported and contain
-**zero** freeblocks, zero overflow cells and zero stale bytes in unallocated gaps. Every
-hard byte-exact-rebuild path is therefore unexercised: a columnariser that gets the overflow
-spill formula, freeblock contents or stale-gap preservation wrong will pass every round-trip
-assert here and corrupt the first real database with delete/update history. Generate a db
-with mixed INSERT/DELETE/UPDATE, no VACUUM, and rows over 4061 B, and assert against that.
-
-A cheaper intermediate step exists: parse leaf cells **read-only** (no rebuild risk) and
-compress the index-page group with the payload as a zstd dictionary. Measured −15.7% on
-wiki_meta.db's index pages, ~3.8% of the file — pays only where indexes are text keys.
-
-The upside here grew: on dumps, per-column value re-spelling was worth more than the
-regrouping itself (17.8% → 28.6% on chinook, and 17.4% → 22.2% on wiki_meta). SQLite already stores ints as binary rather than decimal
-ASCII, so the *planes* half of that win is partly pre-collected — but the *delta* half is
-not, and rowid/foreign-key ramps are exactly what a b-tree is full of. Reuse `encode_col`
-directly once the fields are reachable; it takes a list of byte values and needs nothing
-SQL-specific.
-
-The work: parse cells inside leaf-table pages, split record payloads column-major, and
-keep enough page metadata (cell pointer array, free blocks, overflow chains) to rebuild
-each page byte-exactly. Byte-exactness is the hard part and the whole point — a logical
-dump-and-reload is **not** a lossless compressor, because page layout and vacuum state are
-unrecoverable from the rows.
-
-Worth doing because the mechanism is now proven rather than hypothesised, and SQLite is one
-of the highest-volume structured formats on earth with no format-aware compressor. Days,
-not hours.
+Went with the rest of the format-aware work to
+[sql-compression](https://github.com/BeForce1/sql-compression), rescoped and with the
+prerequisite churn fixture written up. Nothing here depends on it.
 
 ### 4.6 Multi-stream lockstep decode ⭐ the cheap alternative to 4.1
 **PILOT BUILT AND RUN, 2026-07-31 — mechanism confirmed, cost not yet priced.**
@@ -310,7 +277,7 @@ in caveat #3.
 The 0.939 figure predated the match model and mixer, so it was not reproducible with the
 shipped defaults. Task 1.1's **0.940 bpb / 17,873 B** replaced it across `results.json`,
 the charts and the README. Two hardcoded copies of the old numbers turned up during the
-swap — `chart_shapes` held `17.8` and `chart_speed_ratio` held `963, 0.939` — which is why
+swap — the Part 2 chart held `17.8` and `chart_speed_ratio` held `963, 0.939` — which is why
 "single source of truth" needs the charts to actually *read* the JSON. Both now do.
 
 ## Running these

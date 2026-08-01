@@ -15,8 +15,3 @@ venv/
 .idea/
 .vscode/
 .DS_Store
-
-# Shape test data: a container image, Wikipedia-derived tables and a third-party
-# sample DB. Same rule as corpus/ - fetched by scripts/fetch_shape_data.py, never
-# redistributed here.
-shapes/data/*

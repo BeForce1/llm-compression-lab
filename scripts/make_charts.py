@@ -6,6 +6,7 @@ are SVG so they diff, scale, and render natively on GitHub.
     python scripts/make_charts.py
 """
 import json
+import math
 import os
 
 import matplotlib
@@ -98,11 +99,18 @@ def chart_models():
 
 def chart_ablation():
     a = DATA['enwik8_ablation']
+    baseline_cfg = 'LLM only'
+    llm_only = next(v['bpb'] for v in a['variants'] if v['config'] == baseline_cfg)
     rows = []
     for v in a['variants']:
         if 'note' in v:
             continue                      # measured on the biased slice, not comparable
-        col = OURS if v.get('default') else (BAD if v['bpb'] > 0.928 else BASE)
+        # Red = at or worse than running the LLM with no extra machinery. The
+        # threshold was hardcoded 0.928, which IS that baseline's bpb, so with a
+        # strict > it could never fire - and re-measuring would silently
+        # miscolour every bar.
+        col = OURS if v.get('default') else (
+            BASE if v['config'] == baseline_cfg else (BAD if v['bpb'] >= llm_only else BASE))
         rows.append((v['config'], v['bpb'], col))
     barh('chart_ablation.svg',
          'enwik8 mid-file slice - what actually helped',
@@ -129,11 +137,13 @@ def chart_contamination():
     ax.yaxis.grid(True, color=GRID, zorder=0, linewidth=0.8)
     ax.yaxis.set_major_locator(MultipleLocator(1))
     ax.set_ylabel('bits per byte', color=MUTED, fontsize=9)
-    ax.set_ylim(0, 3.9)
+    ax.set_ylim(0, max(ours + xz) * 1.35)
     ax.set_title('Is it compression or memorisation?', color=INK, fontsize=11.5,
                  loc='left', pad=22, fontweight='bold')
     ax.text(0, 1.0, 'xz cannot memorise, so a surviving advantage over it is real. '
-                    'It survives - but shrinks from 2.96x to 2.13x.',
+                    f'It survives - but shrinks from '
+                    f'{c["alice29_likely_memorised"]["advantage_over_xz"]:.2f}x to '
+                    f'{c["post2026_definitely_unseen"]["advantage_over_xz"]:.2f}x.',
             transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
     leg = ax.legend(frameon=False, fontsize=9, loc='upper right')
     for t in leg.get_texts():
@@ -160,8 +170,9 @@ def chart_ptc_evolution():
     ax.set_ylabel('bits per byte', color=MUTED, fontsize=9)
     ax.set_title('ptc: the pure-maths compressor, before and after', color=INK,
                  fontsize=11.5, loc='left', pad=12, fontweight='bold')
-    ax.text(0, 1.0, 'kennedy.xls gained most (-20%), as predicted: it is a fixed-record '
-                    'spreadsheet and the model was 1-D.',
+    _top = max(zip(files, before, after), key=lambda t: 1 - t[2] / t[1])
+    ax.text(0, 1.0, f'{_top[0]} gained most (-{(1 - _top[2] / _top[1]) * 100:.0f}%), as predicted: '
+                    'it is a fixed-record spreadsheet and the model was 1-D.',
             transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
     leg = ax.legend(frameon=False, fontsize=9)
     for t in leg.get_texts():
@@ -172,10 +183,20 @@ def chart_ptc_evolution():
 def chart_speed_ratio():
     """The tradeoff that decides whether any of this is usable."""
     fig, ax = _fig(h=3.6)
-    pts = [('xz -9', 500_000, 2.551, BASE), ('bz2 -9', 400_000, 2.272, BASE),
-           ('brotli 11', 60_000, 2.445, BASE), ('ptc (pure maths)', 24_000, 2.606, OURS),
-           ('llm_ptc + GPT-2', 54, 1.834, OURS),
-           ('llm_ptc + SmolLM2', 963, 0.939, OURS)]
+    r = DATA['headline_alice29']['results']
+    # The llm_ptc points plot the BATCHED encode: the sequential round-trip's own
+    # throughput was measured under CPU contention and is not comparable (see results.json).
+    sm = r['llm_ptc + SmolLM2-135M']['batched_encode']
+    # Classical speeds come from the JSON too. They used to be hardcoded, and were
+    # understated by 5-33x - all in the direction that flattered this repo's codecs.
+    z = DATA['why_not_just_a_faster_zip']['measured']
+    pts = [(label, z[key]['MB/s'] * 1e6, z[key]['bpb'], BASE)
+           for label, key in (('xz -9', 'xz -9'), ('bz2 -9', 'bz2 -9'),
+                              ('brotli 11', 'brotli 11'))]
+    pts.append(('ptc (pure maths)', z['ptc (ours)']['MB/s'] * 1e6, z['ptc (ours)']['bpb'], OURS))
+    pts += [('llm_ptc + GPT-2', r['llm_ptc + GPT-2']['bytes_per_s'],
+             r['llm_ptc + GPT-2']['bpb'], OURS),
+            ('llm_ptc + SmolLM2', sm['bytes_per_s'], sm['bpb'], OURS)]
     for name, speed, bpb, col in pts:
         ax.scatter(speed, bpb, s=90, color=col, zorder=3, edgecolor=BG, linewidth=1.5)
         ax.annotate(name, (speed, bpb), textcoords='offset points', xytext=(9, 4),
@@ -187,20 +208,29 @@ def chart_speed_ratio():
     ax.set_ylabel('bits per byte (better upward)', color=MUTED, fontsize=9)
     ax.set_title('The whole tradeoff, on one chart', color=INK, fontsize=11.5,
                  loc='left', pad=12, fontweight='bold')
-    ax.text(0, 1.0, 'Four orders of magnitude of speed buys about 2.7x of ratio. '
-                    'There is no fast-and-best corner.',
+    lo = min(p[1] for p in pts)
+    hi = max(p[1] for p in pts)
+    orders = math.log10(hi / lo)
+    worst = max(p[2] for p in pts)
+    best = min(p[2] for p in pts)
+    ax.text(0, 1.0, f'{orders:.0f} orders of magnitude of speed buys about '
+                    f'{worst / best:.1f}x of ratio. There is no fast-and-best corner.',
             transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
-    ax.set_xlim(20, 3e6)
+    ax.set_xlim(lo / 4, hi * 8)
     _save(fig, 'chart_speed_ratio.svg')
 
 
 def chart_shapes():
     """Part 2: what each of the three targets actually returned."""
+    fa = DATA['format_aware_transforms']
+    sql = fa['sql_dumps']['files']
     rows = [
-        ('OCI layer, zstd re-encode', 32.3, OURS),
-        ('SQL dump, narrow columns', 17.8, OURS),
-        ('SQLite, page grouping', 4.0, BAD),
-        ('SQL dump, one blob column', 0.1, BAD),
+        ('OCI layer, zstd re-encode',
+         100 * fa['oci_layer']['saving_vs_shipped']['zstd -19 --long=27'], OURS),
+        ('SQL dump, narrow columns', 100 * sql['chinook.sql']['gain'], OURS),
+        ('SQLite, page grouping',
+         100 * max(v['gain'] for v in fa['sqlite_pages']['results'].values()), BAD),
+        ('SQL dump, parser reaches 2%', 100 * sql['wiki.sql']['gain'], BAD),
     ]
     fig, ax = _fig(n=len(rows), h=3.0)
     y = range(len(rows))
@@ -211,14 +241,14 @@ def chart_shapes():
     ax.invert_yaxis()
     ax.xaxis.grid(True, color=GRID, zorder=0, linewidth=0.8)
     ax.set_xlabel('% smaller than the best existing tool', color=MUTED, fontsize=9)
-    ax.set_title('Part 2: three targets, one clear winner', color=INK, fontsize=11.5,
+    ax.set_title('Part 2: three targets, two that paid', color=INK, fontsize=11.5,
                  loc='left', pad=14, fontweight='bold')
     for i, r in enumerate(rows):
         ax.text(r[1] + 0.6, i, f'{r[1]:.1f}%', va='center', color=INK,
                 fontsize=9, fontweight='bold')
     ax.set_xlim(0, 38)
-    ax.text(0, 1.0, 'The biggest win needed no code: zstd is already a legal OCI layer '
-                    'type. Registries ship gzip anyway.',
+    ax.text(0, 1.0, 'The biggest win still needed no code: zstd is already a legal OCI layer '
+                    'type. The bottom row is a parser limit, not a shape result - see the README.',
             transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
     _save(fig, 'chart_shapes.svg')
 

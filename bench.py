@@ -47,17 +47,27 @@ BASELINE = 'xz -9'
 SELF_CONTAINED = {'ptc': os.path.join(HERE, 'ptc.py')}   # ours ships its decoder
 
 
-def measure(name, data):
-    """Compress, decompress, verify. Returns None if it does not round-trip."""
+def measure(name, data, reps=3):
+    """Compress, decompress, verify. Returns None if it does not round-trip.
+
+    Fastest-of-N, because a single sample is not a measurement on a machine that
+    also runs other work: the same xz figure moved ~1.9x across three sittings,
+    and it feeds the Weissman column. ptc is exempted - it is ~1000x slower than
+    the classical codecs and repeating it would dominate the run for no gain.
+    """
     comp, decomp = CODECS[name]
-    t = time.perf_counter()
-    packed = comp(data)
-    tc = (time.perf_counter() - t) * 1000
-    t = time.perf_counter()
-    restored = decomp(packed)
-    td = (time.perf_counter() - t) * 1000
-    if restored != data:
-        return None
+    if name == 'ptc':
+        reps = 1
+    tc = td = float('inf')
+    for _ in range(reps):
+        t = time.perf_counter()
+        packed = comp(data)
+        tc = min(tc, (time.perf_counter() - t) * 1000)
+        t = time.perf_counter()
+        restored = decomp(packed)
+        td = min(td, (time.perf_counter() - t) * 1000)
+        if restored != data:
+            return None
     return {'size': len(packed), 'bpb': 8 * len(packed) / len(data),
             'ratio': len(data) / len(packed), 'tc': tc, 'td': td}
 
@@ -78,7 +88,7 @@ def run(path):
     name = os.path.basename(path)
     print(f'\n{name}  -  {len(data):,} bytes')
     print(f"  {'codec':<10} {'bytes':>9} {'bpb':>6} {'ratio':>6} "
-          f"{'comp ms':>9} {'dec ms':>8} {'weissman':>9}")
+          f"{'comp ms':>9} {'dec ms':>8} {'weissman':>9}   (times: fastest of 3)")
 
     rows, capped = {}, False
     for codec in CODECS:

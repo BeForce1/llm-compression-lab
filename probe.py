@@ -75,13 +75,22 @@ def analyse(data, limit, window):
 def cold_vs_warm(r, edge=64):
     """Do tokens just after a slide cost more than tokens deep into a window?
 
-    Skips the first window of the file entirely - GPT-2 has Alice's opening
-    lines memorised, and letting that into the 'cold' bucket is what made the
-    first version of this probe report nonsense.
+    Both buckets must come from AFTER the first slide, or this measures
+    memorisation instead of context depth - GPT-2 has Alice's opening lines by
+    heart, and the first version of this probe reported nonsense for exactly
+    that reason. The second version still did, less obviously: it skipped only
+    the first WINDOW and defined warm as age >= LIMIT-64, but a token's age can
+    never exceed LIMIT-WINDOW after a slide, so *no* post-slide token could ever
+    land in warm. The warm bucket was 100% pre-slide file opening. Age is now
+    measured against what post-slide tokens can actually reach.
     """
-    pairs = list(zip(r['since'], r['cost']))[r['window']:]
+    # Needs a sample big enough to slide a few times: at the 4096-byte default
+    # the LIMIT=1024 row only reaches age 73, so its warm bucket is empty and
+    # this returns None. Raise the cap to measure that row.
+    top = r['limit'] - r['window']                 # oldest age reachable post-slide
+    pairs = list(zip(r['since'], r['cost']))[r['limit']:]      # drop everything pre-slide
     cold = [c for s, c in pairs if s < edge]
-    warm = [c for s, c in pairs if s >= r['limit'] - edge]
+    warm = [c for s, c in pairs if s >= top - edge]
     if not cold or not warm:
         return None
     return sum(cold) / len(cold), len(cold), sum(warm) / len(warm), len(warm)

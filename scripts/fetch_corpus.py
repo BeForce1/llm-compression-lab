@@ -5,6 +5,7 @@
 Files land in corpus/. Sizes are asserted against the published ones, because a
 truncated download would silently produce wrong benchmark numbers.
 """
+import hashlib
 import io
 import os
 import sys
@@ -26,8 +27,16 @@ ZIPS = {
 }
 
 
+def _ok(member, size):
+    """Present AND the right size. Existence alone is not integrity: a file that
+    was truncated on its first write is accepted forever by an exists() check,
+    and only alice29/book1 have a published figure that would expose it."""
+    p = os.path.join(CORPUS, member)
+    return os.path.exists(p) and os.path.getsize(p) == size
+
+
 def fetch(url, members):
-    if all(os.path.exists(os.path.join(CORPUS, m)) for m in members):
+    if all(_ok(m, s) for m, s in members.items()):
         print(f'have {", ".join(members)}')
         return
     print(f'fetching {url} ...')
@@ -58,21 +67,24 @@ def slice_enwik8():
     with open(src, 'rb') as f:
         f.seek(50_000_000)
         buf = f.read(262_144)
+    # Trim to character boundaries directly rather than by trial decoding. The
+    # old loop raised on the END being mid-character and "fixed" it by advancing
+    # START, silently dropping up to 4 valid bytes - or, if byte 4 was itself a
+    # continuation byte, walking end down to start and writing an EMPTY file.
     start, end = 0, len(buf)
-    while start < 4:
-        try:
-            buf[start:end].decode('utf-8')
-            break
-        except UnicodeDecodeError:
-            start += 1
+    while start < end and buf[start] & 0xC0 == 0x80:      # skip continuation bytes
+        start += 1
     while end > start:
         try:
             buf[start:end].decode('utf-8')
             break
         except UnicodeDecodeError:
             end -= 1
-    open(dst, 'wb').write(buf[start:end])
-    print(f'  enwik8_mid: {end - start:,} bytes from offset 50,000,000')
+    out = buf[start:end]
+    assert out, 'enwik8_mid trimmed to nothing - check the source file'
+    open(dst, 'wb').write(out)
+    print(f'  enwik8_mid: {len(out):,} bytes from offset 50,000,000, '
+          f'sha256 {hashlib.sha256(out).hexdigest()[:16]}...')
 
 
 POST2026_URL = 'https://arxiv.org/html/2602.19626'
@@ -91,11 +103,17 @@ def fetch_post2026():
     it means your number is not comparable to the recorded one, not that
     anything is broken.
     """
-    import hashlib
     import re
     dst = os.path.join(CORPUS, 'post2026.txt')
     if os.path.exists(dst):
-        print('have post2026.txt')
+        # Re-hash: the pin is worthless if it is only checked on the fetch that
+        # creates the file. A copy grabbed from a since-changed arXiv page would
+        # otherwise report 'have post2026.txt' forever.
+        got = hashlib.sha256(open(dst, 'rb').read()).hexdigest()
+        print(f'have post2026.txt{"" if got == POST2026_SHA else "  <- SHA MISMATCH"}')
+        if got != POST2026_SHA:
+            print(f'  NOTE: sha256 {got[:16]}... != pinned {POST2026_SHA[:16]}...\n'
+                  '        Your contamination bpb is not comparable to the recorded one.')
         return
     print(f'fetching {POST2026_URL} ...')
     req = urllib.request.Request(POST2026_URL, headers={'User-Agent': 'llm-compression-lab'})

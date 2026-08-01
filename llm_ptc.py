@@ -47,6 +47,7 @@ VBITS = 16                            # set by _load() from the model's vocab si
 SCALE = 1 << 30                       # integer resolution of the distribution
 LIMIT = int(os.environ.get('LLM_PTC_LIMIT', 1024))    # context budget, capped by
 WINDOW = int(os.environ.get('LLM_PTC_WINDOW', LIMIT // 2))   # the model in _load()
+_WINDOW_SET = 'LLM_PTC_WINDOW' in os.environ          # honour an explicit choice
 # Measured on a representative enwik8 slice (262,144 B, mid-file):
 #   LLM only ............................ 0.928 bpb   1088 B/s
 #   + match order 4 ..................... 0.917       1056      <- default, best trade
@@ -54,6 +55,7 @@ WINDOW = int(os.environ.get('LLM_PTC_WINDOW', LIMIT // 2))   # the model in _loa
 #   + APM/SSE at 25% weight ............. 0.918       1062      no help
 #   + APM/SSE at 75% weight ............. 0.926        887      actively harmful
 ORDERS = [int(x) for x in os.environ.get('LLM_PTC_ORDERS', '4').split(',') if x]
+BATCHED_FLAG = 1 << 31                # header bit: measured by compress_batched
 MAXLEN = 31                           # match length doubles as a confidence bucket
 MMASK = (1 << 22) - 1                 # match index size
 # OFF by default, and that is a result not an oversight: SSE exists to fix a
@@ -68,10 +70,19 @@ _LOADED = {}
 
 def _load():
     if MODEL not in _LOADED:
-        # Thread count is part of the format: it can change float reduction order,
-        # so encoder and decoder must agree. Same process = same count = safe, and
-        # the round-trip assert is what actually proves it.
-        torch.set_num_threads(int(os.environ.get('LLM_PTC_THREADS', os.cpu_count() or 4)))
+        # NOT os.cpu_count(). A single-token step is ~210 tiny GEMVs, each its own
+        # parallel region, and the work is memory-bandwidth-bound - so past ~6
+        # threads you buy only fork-join barriers and hyperthread contention.
+        # Measured sequential encode on this 20-core box, fastest of each:
+        #   20 threads 42 B/s | 10: 82 | 8: 86 | 6: 87 | 4: 83
+        # The old default was therefore the SLOWEST setting on the sweep, by 2.07x.
+        # Sequential streams measured interchangeable across thread counts at
+        # 3 KB - byte-identical output, and cross-decode ok in both directions.
+        # Do NOT generalise that: the BATCHED path at 16 KB does differ by thread
+        # count (1,990 vs 1,992 B), so reduction order is visible there. Treat
+        # this as "safe for the sizes tested", and re-verify before a long run.
+        torch.set_num_threads(int(os.environ.get(
+            'LLM_PTC_THREADS', min(6, os.cpu_count() or 4))))
         torch.set_grad_enabled(False)
         # These checkpoints ship in 16-bit (272 MB / 135M params = 2.0 B/param), but
         # float32 measured FASTER here: this CPU has no AVX512-BF16, so torch
@@ -82,9 +93,15 @@ def _load():
         model.eval()
         # Token ids must fit the binarised id space, and gpt2's 50257 is not a
         # safe assumption - Qwen3 has 151936, which needs 18 bits not 16.
-        global VBITS, LIMIT
+        global VBITS, LIMIT, WINDOW
         VBITS = max(1, (model.config.vocab_size - 1).bit_length())
-        LIMIT = min(LIMIT, getattr(model.config, 'max_position_embeddings', LIMIT))
+        LIMIT = max(2, min(LIMIT, getattr(model.config, 'max_position_embeddings', LIMIT)))
+        # WINDOW is derived from LIMIT at import, BEFORE the clamp above knows the
+        # model. Re-derive it here or the slide stops shrinking the context: with
+        # gpt2 and LLM_PTC_LIMIT=4096 the rebuild asks for position 1024 of a
+        # 1024-entry table (crash), and with WINDOW == LIMIT every token past the
+        # limit triggers a full-window forward (~100x slower, silently).
+        WINDOW = max(1, min(WINDOW if _WINDOW_SET else LIMIT // 2, LIMIT - 1))
         _LOADED[MODEL] = (tok, model)
     return _LOADED[MODEL]
 
@@ -328,6 +345,7 @@ def _schedule(n):
     for i in range(n):
         if i - s + 1 > LIMIT:
             s = i - WINDOW + 1
+        assert s >= 0, f'negative context start: WINDOW={WINDOW} > LIMIT={LIMIT}'
         out.append(s)
     return out
 
@@ -338,11 +356,27 @@ def _progress(done, total, bits, data_len):
           file=sys.stderr, flush=True)
 
 
+def _encode_ids(tok, data):
+    """Tokenise, and prove the tokeniser round-trips these exact bytes first.
+
+    add_special_tokens would prepend a BOS for Gemma/Llama-lineage tokenisers,
+    and decompress() renders every id back as text, so the output would gain the
+    BOS's literal spelling. gpt2/SmolLM2/Qwen3 add nothing, which is why this was
+    latent - it arms itself the moment the model is swapped, i.e. exactly when a
+    long run is about to be paid for. The assert costs milliseconds.
+    """
+    text = data.decode('utf-8')
+    ids = tok(text, add_special_tokens=False).input_ids
+    assert tok.decode(ids, clean_up_tokenization_spaces=False) == text, (
+        f'{MODEL} does not detokenise to its own input - not usable as a codec')
+    return ids
+
+
 def compress(data):
     if not data:
         return b''
     tok, _ = _load()
-    ids = tok(data.decode('utf-8')).input_ids
+    ids = _encode_ids(tok, data)
     pred, enc = Predictor(), ptc.Encoder()
     bank = MatchBank(ORDERS) if ORDERS else None
     mixer = Mixer(1 + len(ORDERS)) if ORDERS else None
@@ -362,22 +396,30 @@ def compress(data):
 
 
 def compress_batched(data):
-    """Same output as compress(), one forward per WINDOW instead of per token.
+    """A RATIO MEASUREMENT, not a codec. One forward per WINDOW, 15.9x faster.
 
     Legal only when encoding: the whole token sequence is already known, and
     causal masking means position k's distribution depends only on 0..k. So one
     pass yields every distribution, reading the weights once per window rather
-    than once per token. Measured 15.9x faster, byte-identical output.
+    than once per token.
 
-    ponytail: batched and single-token GEMMs reduce floats in a different order.
-            The 12-bit quantisation does NOT absorb it - round-trip through the
-            sequential decoder diverged at byte 253. So this path is a valid
-            RATIO MEASUREMENT and an invalid CODEC until inference is integer.
+    The stream it returns does NOT decode. Batched and single-token GEMMs reduce
+    floats in a different order, the 12-bit quantisation does not absorb it, and
+    a sequential decode diverges at byte 253. Measured against the verified
+    sequential figure it is faithful to 0.15% - a good measurement and an invalid
+    codec, until inference is integer. The header is flagged so decompress()
+    refuses it rather than returning plausible garbage.
     """
     if not data:
         return b''
     tok, model = _load()
-    ids = tok(data.decode('utf-8')).input_ids
+    # Opposite thread optimum to the sequential path: one forward per WINDOW is
+    # a big GEMM that parallelises properly, so it wants every core. Measured on
+    # 16 KB: 20 threads 967 B/s, 8: 830, 6: 828. _load() defaults to 6 for the
+    # sequential codec, which would cost this path ~17%.
+    if 'LLM_PTC_THREADS' not in os.environ:
+        torch.set_num_threads(os.cpu_count() or 4)
+    ids = _encode_ids(tok, data)
     virt = [tok.eos_token_id] + ids               # virt[k] predicts ids[k]
     starts = _schedule(len(ids))
     enc = ptc.Encoder()
@@ -403,7 +445,10 @@ def compress_batched(data):
         i = j + 1
         if chatty:
             _progress(i, len(ids), 8 * len(enc.out), len(data))
-    return len(ids).to_bytes(4, 'big') + enc.finish()
+    # Top bit of the count marks "measured, not decodable". Without it this blob
+    # is indistinguishable from compress()'s and decompress() would happily
+    # return wrong text for it.
+    return (BATCHED_FLAG | len(ids)).to_bytes(4, 'big') + enc.finish()
 
 
 def decompress(blob):
@@ -411,6 +456,11 @@ def decompress(blob):
         return b''
     tok, _ = _load()
     n = int.from_bytes(blob[:4], 'big')
+    if n & BATCHED_FLAG:
+        raise ValueError(
+            'this stream came from compress_batched, which is a ratio measurement '
+            'and not a decodable codec - its GEMMs reduce floats in a different '
+            'order than the sequential decoder. Re-encode with compress().')
     pred, dec = Predictor(), ptc.Decoder(blob[4:])
     bank = MatchBank(ORDERS) if ORDERS else None
     mixer = Mixer(1 + len(ORDERS)) if ORDERS else None
@@ -425,7 +475,9 @@ def decompress(blob):
         if bank is not None:
             bank.push(tid)
         prev = tid
-    return tok.decode(ids).encode('utf-8')
+    # Explicit: the cleanup default flipped inside our supported transformers
+    # range and is destructive for BPE (it strips spaces before punctuation).
+    return tok.decode(ids, clean_up_tokenization_spaces=False).encode('utf-8')
 
 
 if __name__ == '__main__':

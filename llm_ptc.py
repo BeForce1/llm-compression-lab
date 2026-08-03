@@ -45,8 +45,25 @@ import ptc
 MODEL = os.environ.get('LLM_PTC_MODEL', 'gpt2')
 VBITS = 16                            # set by _load() from the model's vocab size
 SCALE = 1 << 30                       # integer resolution of the distribution
-LIMIT = int(os.environ.get('LLM_PTC_LIMIT', 1024))    # context budget, capped by
-WINDOW = int(os.environ.get('LLM_PTC_WINDOW', LIMIT // 2))   # the model in _load()
+# Context budget. _load() clamps it to the model's own maximum, so 8192 reads as
+# "all the context this model has": gpt2 gets 1024, SmolLM2 8192. Swept on
+# SmolLM2-135M, batched encode, bpb by LIMIT:
+#                       1024    2048    4096    8192
+#   alice29 (memorised) 0.958   0.946   0.938   0.934    -2.5%
+#   post2026 (unseen)   1.331   1.260   1.220   1.181   -11.3%
+# The old default of 1024 rested on a sweep that found context worth -0.7% - on
+# GPT-2, whose maximum IS 1024, so it measured a ceiling and called it a property
+# of context. On unseen text the curve has not converged even at 8192.
+# It costs the sequential path: 70 -> 49 B/s encode, 66 -> 22 B/s decode over
+# 40,960 B (decode figure measured under contention, so treat it as a bound).
+# Taken anyway: ratio is this codec's only deliverable, its speed is already far
+# past unusable, and the batched measurement path is unaffected (flat, 585 -> 582).
+# ponytail: the batched path materialises LIMIT x vocab x 4 bytes of logits -
+#         1.6 GB for SmolLM2 here, but 5.0 GB for Qwen3's 151,936 vocab. Set
+#         LLM_PTC_LIMIT down for big-vocab models rather than growing a
+#         memory-aware default before anything needs one.
+LIMIT = int(os.environ.get('LLM_PTC_LIMIT', 8192))
+WINDOW = int(os.environ.get('LLM_PTC_WINDOW', LIMIT // 2))   # re-derived in _load()
 _WINDOW_SET = 'LLM_PTC_WINDOW' in os.environ          # honour an explicit choice
 # Measured on a representative enwik8 slice (262,144 B, mid-file):
 #   LLM only ............................ 0.928 bpb   1088 B/s

@@ -288,6 +288,86 @@
       }
     ]
   },
+  "context_sweep": {
+    "_about": "LLM_PTC_LIMIT sweep on SmolLM2-135M, 2026-08-02. Supersedes the context half of negative_results[1]. That refutation swept 256->1024 on GPT-2 and found -0.7%, i.e. noise - but 1024 IS GPT-2 max_position_embeddings, so the flat curve was a model ceiling being mistaken for a property of context. probe.py had SmolLM2 in the same table, still descending at the last point (1.024 -> 0.999 -> 0.990), and that row is the one that generalises.",
+    "method": "Batched encode - a faithful ratio measurement, explicitly not a codec. Same sample every row (trap 2). WINDOW = LIMIT//2 throughout. NOT RUNNABLE before the WINDOW/LIMIT clamp fix of 2026-08-01: LLM_PTC_LIMIT above the model max either crashed or silently ran a full-window forward per token.",
+    "samples": {
+      "alice29.txt": {
+        "bytes": 65536,
+        "tokens": 17914,
+        "note": "Public domain since 1865 and on every mirror - the most contaminated file in this corpus. Sized so LIMIT=8192 still slides 3 times; the old sweep used 4,096 B, which tokenises to 1,098, so its 1024 row never slid even once."
+      },
+      "post2026.txt": {
+        "bytes": 50757,
+        "note": "Post-cutoff arXiv text - the repo contamination control. Never seen by the model."
+      }
+    },
+    "bpb": {
+      "alice29.txt": {
+        "512": 0.973,
+        "1024": 0.958,
+        "2048": 0.946,
+        "4096": 0.938,
+        "8192": 0.934
+      },
+      "post2026.txt": {
+        "1024": 1.331,
+        "2048": 1.26,
+        "4096": 1.22,
+        "8192": 1.181
+      }
+    },
+    "gain_1024_to_8192": {
+      "alice29.txt": 0.025,
+      "post2026.txt": 0.113
+    },
+    "per_doubling_pct": {
+      "_about": "Percent bpb reduction at each doubling. The shapes differ, and the difference is the whole finding.",
+      "alice29.txt": [
+        1.54,
+        1.25,
+        0.85,
+        0.43
+      ],
+      "post2026.txt": [
+        5.33,
+        3.17,
+        3.2
+      ]
+    },
+    "finding": "Context is worth 2.5% on memorised text and 11.3% on unseen text, 1024 -> 8192. The shapes differ more than the totals: on alice29 the gain halves every doubling (1.54 -> 1.25 -> 0.85 -> 0.43) and is visibly converging, while on post2026 the last doubling paid 3.20% against the previous 3.17% - no convergence at all. 8192 is not \"enough context\", it is simply all SmolLM2-135M has. The mechanism is the obvious one: on memorised text the model recites and extra context is largely redundant with the weights; on novel text, in-document notation and terminology is the only thing it has.",
+    "consequence_for_model_comparison": "model_comparison measured Qwen3-0.6B at 1.11 bpb with LIMIT=1024 against a 32,768-token native context. If context is worth ~11% per 8x on unseen text, that row is partly a context measurement wearing a model name. GPT-2 vs SmolLM2 was a fair fight - both were at 1024, GPT-2 max - so the 45% model finding stands; the Qwen3 row does not.",
+    "do_not_extrapolate": "The post2026 curve is still at full slope at 8192, so a naive read says more context keeps paying. There is no more: 8192 is max_position_embeddings, and RoPE extension changes the model rather than the context. Trap 3.",
+    "sequential_verification": {
+      "_about": "The sweep above is the batched path, which is a ratio measurement and not a codec. This is the same comparison on the path that actually decodes: real sequential encode AND decode, byte-compared. 40,960 B of alice29 = 11,172 tokens - the smallest size that both slides at LIMIT=8192 and clears llm_ptc chatty threshold so a 40-minute run is not silent.",
+      "sample": {
+        "file": "alice29.txt",
+        "bytes": 40960,
+        "tokens": 11172
+      },
+      "rows": {
+        "1024": {
+          "size": 5023,
+          "bpb": 0.981,
+          "round_trip": "ok",
+          "encode_B_per_s": 70,
+          "decode_B_per_s": 66
+        },
+        "8192": {
+          "size": 4895,
+          "bpb": 0.956,
+          "round_trip": "ok",
+          "encode_B_per_s": 49,
+          "decode_B_per_s": 22
+        }
+      },
+      "ratio_gain": 0.0255,
+      "cross_check": "Sequential says -2.55%, batched said -2.51% on a different sample size. The two paths agreeing on the DELTA to within 0.04 points is what licenses using the fast path for the sweep - it was never licensed for absolute figures.",
+      "speed_caveat": "TRAP 6, self-inflicted: results.json edits and git commands were run during the 8192 half and not the 1024 half. Encode 70 -> 49 is trustworthy in direction and roughly in size; decode 66 -> 22 is an UPPER BOUND on the cost, with the true figure somewhere between 1.5x and 3x. bpb is deterministic and unaffected. A clean number needs an idle box, and the full-file headline run is the natural place to get one.",
+      "why_decode_suffers_more": "Unexplained, and left that way on purpose. Encode and decode run identical model work per token - the only difference is coder.encode vs coder.decode over 16 bits. A 3x split between them does not follow from that, so the likeliest causes are the contention above plus KV-cache pressure at 8192. Not investigated; do not repeat the guess as a finding."
+    },
+    "batched_fidelity_revisited": "The repo claims the batched path is faithful to 0.15%, measured on alice29. On post2026 at LIMIT=1024 it reads 1.331 against contamination_test 1.338, a 0.5% gap - over 3x less faithful on unseen text. The same runs reproduced that test xz (2.844), bz2 (2.809) and ptc (3.225) figures EXACTLY, so this is a real path difference and not a different sample. Quote 0.15% as an alice29 figure, not a property of the path."
+  },
   "negative_results": [
     {
       "claim": "bfloat16 weights will be ~2x faster because the checkpoint is 16-bit and we are memory-bandwidth bound",
@@ -298,7 +378,8 @@
       "claim": "the gap to ts_zip is mostly our 512-token context resets",
       "outcome": "REFUTED",
       "detail": "Sweeping context 256->1024 moved GPT-2's bpb by -0.7%, i.e. noise. The gap was the model. CAVEAT added 2026-07-31: the second half of the original claim - 'post-slide tokens cost the same as deep-in-window ones' - rested on probe.py's cold_vs_warm, whose warm bucket was invalid. It defined warm as age >= LIMIT-64, but a token's age can never exceed LIMIT-WINDOW after a slide, so warm contained ZERO post-slide tokens in all three swept configs - it was 64 tokens of the memorised alice29 opening. The sweep half of the refutation stands on its own (it is a bpb measurement, not a bucket comparison); the per-bucket half is unmeasured until probe.py is re-run with the fixed buckets on a sample large enough to slide several times.",
-      "instrument_fixed": "probe.py cold_vs_warm, 2026-07-31: both buckets now drawn from post-first-slide tokens only."
+      "instrument_fixed": "probe.py cold_vs_warm, 2026-07-31: both buckets now drawn from post-first-slide tokens only.",
+      "revisited_2026_08_02": "The sweep half is now SUPERSEDED too, and for the same species of reason as the bucket half. It swept GPT-2, whose max_position_embeddings is 1024, so it measured a model that had already hit its ceiling and generalised the flat result to context in general. Swept properly on SmolLM2 to its native 8192: -2.5% on alice29 and -11.3% on post-cutoff text. \"The gap was the model\" is still right about ts_zip; \"context barely matters\" was never measured. See context_sweep."
     },
     {
       "claim": "blending a match prediction into the LLM distribution will help on repetitive markup",

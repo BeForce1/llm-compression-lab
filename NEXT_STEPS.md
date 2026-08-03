@@ -8,9 +8,10 @@ Written 2026-08-01, after a full audit of the codebase. Companion to
 
 ## What we can actually claim
 
-**0.940 bpb on `alice29.txt`, verified byte-exact round-trip on the whole file.** That is
-8.5×, or 2.71× smaller than `xz -9`, and 17.7% under ts_zip's published figure on the
-identical file.
+**0.915 bpb on `alice29.txt`, verified byte-exact round-trip on the whole file.** That is
+8.74×, or 2.79× smaller than `xz -9`, and 19.9% under ts_zip's published figure on the
+identical file. *(Was 0.940 until 2026-08-03, when the context sweep below moved the
+default `LIMIT` from 1024 to 8192 and the headline was re-earned at shipped defaults.)*
 
 Three caveats that are load-bearing, not throat-clearing:
 
@@ -18,8 +19,10 @@ Three caveats that are load-bearing, not throat-clearing:
    their 2023 one. It is not an algorithmic advance and should never be presented as one.
 2. **"Verified" means this machine.** Same thread count, same library versions. It is a
    verified round-trip, not a portable format, and no amount of further running fixes that.
-3. **The break-even is unreachable.** A 272 MB model repays itself after ~1.35 GB of text,
-   which at ~85 B/s takes months to read back. Quote the ratio with that attached.
+3. **The break-even is unreachable, and moved the wrong way.** A 272 MB model repays itself
+   after ~1.33 GB of text, which at the measured 32 B/s takes **481 days** of continuous
+   reading. The better ratio made this worse, not better — 2.65% of ratio cost 2.7× of
+   speed, pushing break-even out from ~180 days. Quote the ratio with that attached.
 
 The honest summary is the one `handoff.md` already gives: **a well-measured reproduction,
 not a contribution.** What is genuinely worth keeping is the method and the negative
@@ -66,35 +69,50 @@ codec speeds understated by 5–33×, all in the direction that flattered this r
 
 ## What to do next
 
-### 1. Sweep the context length — **~1 hour** ⭐ best value per hour
+### ~~1. Sweep the context length~~ — **DONE 2026-08-03.** Worth −11.3%
 
-`LIMIT` defaults to 1024. SmolLM2-135M natively supports **8192**. The sweep behind the
-"+3%, context barely matters" conclusion stopped at 1024, on a 4,096-byte sample that
-tokenises to 1,098 tokens — so the 1024 row **never slid even once**, and the curve was
-still descending at the last point (1.024 → 0.999 → 0.990).
+Predicted "+1–3%". Measured, on SmolLM2's native 8192:
 
-```bash
-for L in 2048 4096 8192; do
-  LLM_PTC_LIMIT=$L python llm_ptc.py corpus/enwik8_mid 262144 enc batch
-done
-```
+| LIMIT | 1024 | 2048 | 4096 | 8192 | total |
+|---|---:|---:|---:|---:|---:|
+| alice29 (memorised) | 0.958 | 0.946 | 0.938 | 0.934 | **−2.5%** |
+| post2026 (unseen) | 1.331 | 1.260 | 1.220 | 1.181 | **−11.3%** |
 
-Same sample size every run (trap 2). Expect +1–3% bpb for ~+17% time at 2048. **This was
-not runnable before the `WINDOW` fix** — `LLM_PTC_LIMIT` above the model max crashed or
-silently ran a full-window forward per token.
+The old default came from a sweep that found context worth −0.7% — **on GPT-2, whose
+maximum *is* 1024.** It measured a ceiling and called it a property of context.
 
-### 2. Run the model A/Bs — **~1 hour each**
+Two things worth carrying: on unseen text the curve **has not converged** at 8192 (last
+doubling paid 3.20% against the previous 3.17%), so 8192 is not enough context, it is all
+this model has. And the split between the two rows is the cleanest memorisation evidence
+here — on text the model has read, context is redundant with the weights.
 
-The model is worth 45%; everything hand-built is worth ~1%. Three queued, all now unblocked
-by the `add_special_tokens` fix:
+Default now 8192, clamped per model. Cost: encode 87 → 32 B/s. Taken, because ratio is
+this codec's only deliverable and its speed was already far past usable.
 
-- `Qwen/Qwen3-0.6B-Base` — settles the base-vs-instruct hypothesis the README states as
-  untested. Either confirms a useful rule or removes a claim.
-- `HuggingFaceTB/SmolLM2-360M` — compare against **0.939** (the batched figure), not the
-  0.940 headline; that command runs `batch` and mixing paths manufactures a 0.001 difference
-  that is the encoder, not the model.
-- `google/gemma-3-270m` — the counter-test to the "big vocab wastes capacity" hypothesis.
-  Needs a detokenise pre-flight; it is SentencePiece, not byte-level BPE.
+### 2. Run the model A/Bs — **~1 hour each** ⭐ now the best value per hour
+
+The model is worth 45%; everything hand-built is worth ~1%. Unblocked by the
+`add_special_tokens` fix — and the context sweep just made one of these urgent.
+
+**`model_comparison` is not currently a fair test.** Every row ran at `LIMIT=1024`. That
+was fine for GPT-2 vs SmolLM2 (1024 is GPT-2's maximum, so both were at a real ceiling),
+which is why the 45% model finding stands. It is *not* fine for Qwen3-0.6B, measured at
+1.11 bpb against a **32,768-token native context** — at 1/32nd of its context, that row is
+partly a context measurement wearing a model's name. Re-run each model at its own native
+maximum, and report the LIMIT beside every figure.
+
+- `Qwen/Qwen3-0.6B-Base` — settles base-vs-instruct, *and* re-tests the "not worth its
+  size" verdict now known to have been measured under a handicap.
+- `HuggingFaceTB/SmolLM2-360M` — compare against **0.934** (batched, LIMIT=8192), not the
+  0.915 headline; mixing paths and LIMITs manufactures differences that are the harness,
+  not the model.
+- `google/gemma-3-270m` — the counter-test to "big vocab wastes capacity". Needs a
+  detokenise pre-flight; it is SentencePiece, not byte-level BPE.
+
+**Watch the memory.** The batched path materialises `LIMIT × vocab × 4` bytes of logits:
+1.6 GB for SmolLM2 at 8192, but **5.0 GB for Qwen3's 151,936 vocab** and ~8.6 GB for
+Gemma's 262,144. This box has 15.7 GB with ~2.4 GB typically free. Cap `LLM_PTC_LIMIT` for
+the wide-vocab models or use the sequential path, and *say which* in the results.
 
 ### 3. Build lockstep decode properly — **days** ⭐ the only novel idea here
 

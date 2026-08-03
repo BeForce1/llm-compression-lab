@@ -42,7 +42,7 @@ already have.
 |---|---|
 | `ptc.py` lossless on arbitrary bytes incl. binary, up to 1,029,744 B | **verified** |
 | `ptc.py` → 3.1× on text (2.606 bpb) | **verified** |
-| `llm_ptc` → 8.5× on alice29 (0.940 bpb) | **verified** — full-file sequential round-trip |
+| `llm_ptc` → 8.74× on alice29 (0.915 bpb) | **verified** — full-file sequential round-trip, 2026-08-03, at `LIMIT=8192` |
 | `llm_ptc` round-trip | **verified to 152,089 B**, one machine only — see below |
 | SQL dump transform → −28.6% chinook / −22.2% wiki_meta | **verified**, round-trip asserted every run, plus a `selfcheck()` over 12 dump shapes |
 | SQLite page grouping → −0.5% | verified, and a **dead end** |
@@ -71,6 +71,24 @@ Three things to carry forward:
   ran on this machine through the decode half — trap 6 below, committed *again*, by the
   person who wrote trap 6. The bpb is deterministic and unaffected.
 
+### And landed again, 2026-08-03: **0.915 bpb / 17,400 B**
+
+The context sweep moved the default `LIMIT` from 1024 to 8192, so the headline had to be
+re-earned at the shipped defaults. Full sequential encode **and** decode of `alice29.txt`,
+pid 19296, ~5.5 hours: `round-trip: ok`. **473 bytes smaller, 2.65%, from one changed
+constant.** 8.74× vs raw, 2.79× vs `xz -9`, 19.9% under ts_zip.
+
+- **Throughput, finally clean: 32 B/s encode, 34 B/s decode.** Idle box, whole file. These
+  are the first figures here that are neither contended nor small-sample inflated.
+- **Decode is not slower than encode.** A 40,960 B test said 22 vs 49 B/s and the obvious
+  mechanism was KV-cache pressure at 8192. Both wrong: the gap was tooling contention, and
+  on an idle box decode is marginally *faster*. It was written into `results.json` flagged
+  as not-investigated rather than as a finding, which is the only reason it did not become
+  the fourth plausible-mechanism-explaining-an-artifact in this repo.
+- **The ratio got better and the economics got worse.** Break-even against `xz` moved from
+  ~180 days to **481 days** of continuous reading. Both unusable; quote the ratio with this
+  attached.
+
 ## Traps that will bite you
 
 These all cost me real time. They are the most valuable part of this document.
@@ -83,6 +101,15 @@ These all cost me real time. They are the most valuable part of this document.
 3. **Never extrapolate throughput from small samples.** I estimated a 85-minute run from
    2–8 KB measurements; it is taking 3× that. On small samples the context window is mostly
    *empty*, so per-token attention is cheap. Real files sit at full context.
+   **Bit again 2026-08-03, with this trap already written down.** A 40,960 B run at
+   `LIMIT=8192` measured 49 B/s encode; the full file measured **32**. 40,960 B is 11,172
+   tokens against a 8,192-token window, so most of it was still filling. The rule scales
+   with `LIMIT`: at 8192 even a 40 KB sample is a small sample. Knowing the trap is not the
+   same as checking for it.
+   **Corollary, learned the same day:** do not compute a rate by reading an untimestamped
+   progress log. `llm_ptc` prints `... N/M tokens` with no clock, so the newest line when
+   you happen to look may be 20 minutes stale. Every rate I derived that way was a lower
+   bound presented as a measurement. Either add timestamps or wait for the final line.
 4. **A surprising measurement is usually a broken instrument.** Twice confirmed. `probe.py`
    once reported that tokens *after* a window slide were cheaper than deep-context ones —
    the bug was that its "cold" bucket held the *start of the file*, and GPT-2 has Alice's

@@ -4,7 +4,7 @@ One method: measure the incumbent properly, then find out whether there is anyth
 to win.
 
 **Can a language model beat the general-purpose compressors?** Two lossless compressors
-sharing one arithmetic coder. Result: **0.940 bpb on `alice29.txt`**, 2.71× smaller than
+sharing one arithmetic coder. Result: **0.915 bpb on `alice29.txt`**, 2.79× smaller than
 `xz -9`, round-trip verified on the whole file. Real, and almost entirely down to the
 *model* rather than to any of our engineering — which is the finding, not a disclaimer.
 
@@ -32,15 +32,15 @@ On `alice29.txt` (152,089 bytes) — every codec on the identical file:
 
 | codec | size | bits/byte | vs ours |
 |---|---:|---:|---:|
-| **llm_ptc + SmolLM2-135M** | **17,873** | **0.940** | — |
-| ts_zip (RWKV-169M) *— published* | ~21,711 | 1.142 | +21.5% |
-| llm_ptc + GPT-2 124M | 34,868 | 1.834 | +95% |
-| `bz2 -9` | 43,202 | 2.272 | +142% |
-| `brotli -q 11` | 46,487 | 2.445 | +160% |
-| `xz -9` | 48,492 | 2.551 | +171% |
-| `ptc` (pure maths, this repo) | 49,543 | 2.606 | +177% |
+| **llm_ptc + SmolLM2-135M** | **17,400** | **0.915** | — |
+| ts_zip (RWKV-169M) *— published* | ~21,711 | 1.142 | +25% |
+| llm_ptc + GPT-2 124M | 34,868 | 1.834 | +100% |
+| `bz2 -9` | 43,202 | 2.272 | +148% |
+| `brotli -q 11` | 46,487 | 2.445 | +167% |
+| `xz -9` | 48,492 | 2.551 | +179% |
+| `ptc` (pure maths, this repo) | 49,543 | 2.606 | +185% |
 
-**2.71× smaller than `xz -9`**, and 17.7% smaller than the published ts_zip figure on the
+**2.79× smaller than `xz -9`**, and 19.9% smaller than the published ts_zip figure on the
 same file — using a 272 MB model on CPU. That row is a **verified round-trip on the whole
 file**, not an entropy measurement; what it cost to get there is the next section.
 
@@ -57,28 +57,38 @@ A full sequential encode **and decode** of the whole file has since closed that 
 | | largest **verified** round-trip | compression |
 |---|---:|---:|
 | `ptc.py` | **1,029,744 B** — any size, any bytes incl. binary | **3.1×** |
-| `llm_ptc` + SmolLM2 | **152,089 B** — whole of `alice29.txt` | **8.5×** |
+| `llm_ptc` + SmolLM2 | **152,089 B** — whole of `alice29.txt` | **8.74×** |
 
-The verified figure is **0.940 bpb / 17,873 B**, against the batched path's 17,846 B. Two
-things follow, and the second matters more than the first:
+The verified figure is **0.915 bpb / 17,400 B**, re-run 2026-08-03 at the shipped defaults
+after the context sweep moved `LIMIT` from 1024 to 8192. It supersedes 0.940 / 17,873 B,
+which was the same code and model on the same file at the old default — **473 bytes, 2.65%,
+bought by one changed constant.** Two things still hold:
 
-1. **The batched measurement was honest** — 27 bytes, 0.15%. It was never decodable, but it
-   was not inflated either. A prediction that survived contact.
+1. **The batched measurement was honest** — 27 bytes, 0.15%, at LIMIT=1024. But that figure
+   is specific to `alice29`: on post-cutoff text the same path reads 0.5% off the sequential
+   one. Quote it as an alice29 result, not a property of the path.
 2. **"Verified" still means *same machine, same thread count, same library versions*.** It
    is a verified round-trip, not a portable format, and no amount of further running fixes
    that. Making it portable is the [int8 determinism task](Long_Time_Tests.md).
 
-The run also reported 30 B/s encode and 42 B/s decode. **Disregard both** — unrelated `xz`
-benchmarking was running on the same machine through the decode half, which is trap 6 in
-`handoff.md`, committed by the person who wrote trap 6. Ratios are deterministic and
-unaffected; throughput measured under contention is fiction.
+The run reported **32 B/s encode and 34 B/s decode** — an idle machine, whole file, nothing
+else running. These are the first throughput figures here that are neither contended nor
+inflated by a sample barely larger than `LIMIT`, and they refute something: a 40,960 B test
+had measured decode at a third of encode, and the plausible mechanism for that (KV-cache
+pressure at 8192) was wrong. Decode is marginally *faster*. The gap was tooling running on
+the same box — trap 6 again, committed again by the person who wrote trap 6.
 
-### And the number that keeps the 8.5× honest
+### And the number that keeps the 8.74× honest
 
-Against `xz` we save ~0.2 bytes per input byte, so a 272 MB model repays itself after
-about **1.35 GB of text** — which at 21–65 B/s decode takes between 8 months and 2 years
-to read back. The break-even exists on paper and is unreachable in practice. Quote the
-ratio with that attached, or don't quote it.
+Against `xz` we save ~0.204 bytes per input byte, so a 272 MB model repays itself after
+about **1.33 GB of text** — which at the measured 32 B/s takes **481 days** to read back.
+The break-even exists on paper and is unreachable in practice. Quote the ratio with that
+attached, or don't quote it.
+
+Note which way that moved. The better ratio made the practicality *worse*: the old default
+broke even after ~180 days at 87 B/s, and buying 2.65% of ratio with 2.7× of speed pushed
+it to 481. Both are unusable, so the ratio is the deliverable — but the tradeoff is real
+and it is not in this project's favour.
 
 Also worth reading: `alice29.txt` is public-domain text the model has almost certainly
 memorised. See [§ Is it compression, or memorisation?](#is-it-compression-or-memorisation)
@@ -179,8 +189,20 @@ they have comparable dictionary-level redundancy — yet the model finds alice29
 easier. That asymmetry is the fingerprint of familiarity.
 
 Genre is a partial confound (dense technical prose is harder than Victorian narrative
-for any model), so this doesn't cleanly separate memorisation from difficulty. **The
-number to quote for unseen prose is ~1.34 bpb.**
+for any model), so this doesn't cleanly separate memorisation from difficulty.
+
+> **Updated 2026-08-03.** That table is at `LIMIT=1024`, the old default. Raising it to
+> 8192 helps unseen text far more than memorised text — post2026 goes **1.331 → 1.181 bpb**
+> (batched), a **−11.3%** the alice29 side cannot match at −2.5%. Correcting for the 0.5%
+> batched-vs-sequential gap measured on this file, **the number to quote for unseen prose
+> is now ~1.19 bpb, and the honest advantage over `xz` is ~2.40×** rather than 2.13×.
+> The alice29 half has *not* been re-run on this 50,757 B slice, so the two columns above
+> are no longer a matched pair — re-run both before quoting the ratio *between* them.
+
+That asymmetry is itself the cleanest evidence in this repo that memorisation is doing
+real work: on text the model has read, extra context is largely redundant with what is
+already in the weights, so it buys little. On text it has never seen, in-document
+notation and terminology is the only thing it has, and context is worth 4× more.
 
 ---
 
@@ -200,9 +222,10 @@ purpose, see the caveat below.
 | + APM/SSE at 75% weight | 0.926 | 887 B/s |
 
 **Only the match model pays.** It's worth −1.2%, and it pays because it supplies
-information the LLM *structurally cannot have*: exact repeats beyond its 1024-token
-window. Extra match orders buy 0.2% for 25% of the speed. **SSE/APM — the stage every
-serious context-mixing compressor has — measured neutral to harmful.**
+information the LLM *structurally cannot have*: exact repeats beyond its context window
+(1024 tokens when this was measured, 8192 since). Extra match orders buy 0.2% for 25% of
+the speed. **SSE/APM — the stage every serious context-mixing compressor has — measured
+neutral to harmful.**
 
 There's a coherent reason, and it's the most transferable finding here. SSE exists to fix
 a *miscalibrated* mixer. `probe.py` measures this LLM as well-calibrated (12-bit
@@ -301,7 +324,7 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | prediction | outcome | what actually happened |
 |---|---|---|
 | bf16 weights will be ~2× faster — the checkpoint is 16-bit and we're bandwidth-bound | **refuted** | 64 vs 84 B/s, *slower*. No AVX512-BF16 on this CPU, so torch converts to fp32 per matmul and we pay conversion on top. |
-| the gap to ts_zip is mostly our 512-token context resets | **refuted** | Sweeping context 256→1024 moved GPT-2's bpb by −0.7%, i.e. noise. Post-slide tokens cost the same as deep-in-window ones. The gap was the model. |
+| the gap to ts_zip is mostly our 512-token context resets | **refuted, then the refutation was too** | Sweeping context 256→1024 moved GPT-2's bpb by −0.7%. But 1024 *is* GPT-2's maximum, so that measured a ceiling and called it a property of context. Swept properly on SmolLM2 to its native 8192: **−2.5% on alice29, −11.3% on unseen text.** "The gap was the model" is still right about ts_zip; "context barely matters" was never measured. |
 | blending a match prediction into the LLM will help on repetitive markup | **refuted as written** | Linear interpolation measured 2% worse. Re-doing it as logistic mixing with learned weights then gave −1.2%. |
 | 12-bit probability quantisation costs ratio | **inverted** | It *gains* 5.3% against GPT-2 by smoothing an overconfident model. |
 | SSE/APM will help, as it does in every serious CM compressor | **refuted** | Neutral at 25% weight, harmful at 75%. Nothing to recalibrate. |
@@ -321,7 +344,7 @@ instrument than a discovery.**
 ## Caveats, read these
 
 1. **The headline is verified, but only on one machine.** The whole of `alice29.txt`
-   round-trips through the sequential path at 0.940 bpb. What that does *not* buy is
+   round-trips through the sequential path at 0.915 bpb. What that does *not* buy is
    portability: decoding needs the same machine, thread count and library versions, because
    float reduction order changes the probabilities. The same effect is why
    `compress_batched` — 16× faster, and the source of the old 0.939 figure — produces a
@@ -419,9 +442,11 @@ The measurements this repo *hasn't* made are tracked in
 **[Long_Time_Tests.md](Long_Time_Tests.md)** — what each one buys, what it costs in wall
 clock, and the order to do them in. The short version:
 
-- ~~**~75 min** proves the headline is genuinely lossless~~ — **done**, 0.940 bpb,
-  `round-trip: ok`. It took closer to 3 hours; see trap 3 in `handoff.md` on why the
-  estimate was wrong.
+- ~~**~75 min** proves the headline is genuinely lossless~~ — **done twice**. First at
+  `LIMIT=1024` for 0.940 bpb, then re-run 2026-08-03 at the new 8192 default for **0.915
+  bpb**, `round-trip: ok` both times. The first estimate said 75 min and took ~3 hours; the
+  second said 2.5–3 h and took ~5.5. See trap 3 in `handoff.md`, and note it has now caught
+  the same person twice.
 - **~26 hours** turns the ts_zip enwik8 comparison from an extrapolation into a measurement.
 - **~17 days** would be a verified full-enwik8 round-trip, which is why deterministic
   integer inference is the one engineering task that matters more than any run.

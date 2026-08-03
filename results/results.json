@@ -125,23 +125,29 @@
     ]
   },
   "headline_alice29": {
-    "_about": "Full alice29.txt, 152089 bytes. The llm_ptc row is a VERIFIED round-trip as of 2026-07-31 - sequential encode+decode of the whole file with shipped defaults. It supersedes the batched-encode measurement, retained under batched_encode for comparison.",
+    "_about": "Full alice29.txt, 152089 bytes. VERIFIED round-trip as of 2026-08-03: sequential encode+decode of the whole file at the shipped defaults, which now means LIMIT=8192. Supersedes the 0.940 measured at LIMIT=1024, kept below under superseded_2026_07_31. The 32/34 B/s pair is the first throughput this project has measured on an idle box over a full file - every earlier figure was either contended or inflated by a sample barely larger than LIMIT.",
     "bytes": 152089,
     "results": {
       "llm_ptc + SmolLM2-135M": {
-        "bpb": 0.94,
-        "size": 17873,
-        "round_trip": "ok - full file, sequential encode+decode, 2026-07-31",
+        "bpb": 0.915,
+        "size": 17400,
+        "round_trip": "ok - full file, sequential encode+decode, 2026-08-03, LIMIT=8192",
         "batched_encode": {
-          "_about": "16x faster measurement path. Its stream does NOT decode sequentially (float reduction order), but it proved faithful as an entropy measurement: 27 bytes / 0.001 bpb from the verified figure.",
+          "_about": "16x faster measurement path. Its stream does NOT decode sequentially (float reduction order), but it proved faithful as an entropy measurement: 27 bytes / 0.001 bpb from the verified figure. NOTE 2026-08-03: this comparison was made at LIMIT=1024. The 0.15% fidelity figure is an alice29 figure - see context_sweep.batched_fidelity_revisited.",
           "bpb": 0.939,
           "size": 17846,
           "bytes_per_s": 963
         },
         "sequential_bytes_per_s": {
-          "encode": 30,
-          "decode": 42,
-          "DISREGARD": "Trap 6: heavy xz/zstd benchmarking ran on this machine during the decode half. Both figures are contended and not comparable to the 963 B/s batched figure. The bpb is deterministic and unaffected."
+          "encode": 32,
+          "decode": 34,
+          "_about": "Idle machine, whole file, nothing else running. Decode is marginally FASTER than encode, which settles the open question from the 40,960 B gate."
+        },
+        "superseded_2026_07_31": {
+          "bpb": 0.94,
+          "size": 17873,
+          "limit": 1024,
+          "why": "LIMIT=1024 was the default until the context sweep showed it was set from a GPT-2 ceiling. Same code, same model, same file - 473 bytes larger, 2.65%."
         }
       },
       "ts_zip (published)": {
@@ -364,7 +370,17 @@
       "ratio_gain": 0.0255,
       "cross_check": "Sequential says -2.55%, batched said -2.51% on a different sample size. The two paths agreeing on the DELTA to within 0.04 points is what licenses using the fast path for the sweep - it was never licensed for absolute figures.",
       "speed_caveat": "TRAP 6, self-inflicted: results.json edits and git commands were run during the 8192 half and not the 1024 half. Encode 70 -> 49 is trustworthy in direction and roughly in size; decode 66 -> 22 is an UPPER BOUND on the cost, with the true figure somewhere between 1.5x and 3x. bpb is deterministic and unaffected. A clean number needs an idle box, and the full-file headline run is the natural place to get one.",
-      "why_decode_suffers_more": "Unexplained, and left that way on purpose. Encode and decode run identical model work per token - the only difference is coder.encode vs coder.decode over 16 bits. A 3x split between them does not follow from that, so the likeliest causes are the contention above plus KV-cache pressure at 8192. Not investigated; do not repeat the guess as a finding."
+      "why_decode_suffers_more": "REFUTED 2026-08-03, and it was never real. The 66 -> 22 B/s decode drop was entirely contention from tooling run during that half: on an idle box over the full file, decode is 34 B/s against encode 32 B/s - decode is marginally FASTER. The guessed mechanism (KV-cache pressure at 8192) was recorded as not-investigated rather than as a finding, and it would have been wrong. This is the third time in this project that a plausible mechanism for a contended measurement turned out to be explaining an artifact.",
+      "full_file_2026_08_03": {
+        "_about": "The real thing: 152,089 B, LIMIT=8192, idle box. Supersedes the 40,960 B rows above for throughput; they stand for the ratio.",
+        "bytes": 152089,
+        "size": 17400,
+        "bpb": 0.915,
+        "round_trip": "ok",
+        "encode_B_per_s": 32,
+        "decode_B_per_s": 34
+      },
+      "ramp_inflation": "The 49 B/s encode measured here is inflated 1.53x against the full-file 32 B/s. Same LIMIT, same code: 40,960 B is 11,172 tokens against LIMIT=8192, so most tokens were encoded at a context still filling toward the first slide. A throughput number at large LIMIT measures the ramp unless the sample is much larger than LIMIT - the same species of error as a sweep row that never slid."
     },
     "batched_fidelity_revisited": "The repo claims the batched path is faithful to 0.15%, measured on alice29. On post2026 at LIMIT=1024 it reads 1.331 against contamination_test 1.338, a 0.5% gap - over 3x less faithful on unseen text. The same runs reproduced that test xz (2.844), bz2 (2.809) and ptc (3.225) figures EXACTLY, so this is a real path difference and not a different sample. Quote 0.15% as an alice29 figure, not a property of the path."
   },

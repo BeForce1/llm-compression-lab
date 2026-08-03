@@ -148,6 +148,33 @@ Price it honestly first: 360M is 2.7× the parameters, so it is slower than the 
 already put break-even at 481 days, and the model on disk grows from 272 MB to ~720 MB.
 The ratio improves and the economics get worse again.
 
+### ~~3. Build lockstep decode properly~~ — **DONE 2026-08-03**, and it took hours not days
+
+Shipped in `llm_ptc.py` as `compress_lockstep` / `decompress_lockstep`, ~130 lines.
+Byte-exact round-trip at **S=1, 2, 4, 8, 16**; `decompress()` routes on a header bit.
+
+| S | bpb | decode | speedup | ratio cost |
+|---:|---:|---:|---:|---:|
+| 1 | 0.989 | 73 B/s | — | — |
+| 4 | 1.079 | 257 B/s | 3.50× | +9.1% |
+| 16 | 1.359 | 777 B/s | **10.59×** | +37.4% |
+
+**Cost shrinks with segment length, as predicted — but by less than predicted.** 4×
+the segment length took the S=4 penalty from **9.08% → 3.97%**. The pilot claimed that
+same step gave 8.9% → 2.6%; it does not replicate, and 3.97% is the number to quote.
+
+Two costs are conflated at these sizes and it matters: 560- and 2,221-token segments are
+both *shorter* than `LIMIT=8192`, so a segment never fills its context. The penalty mixes
+one cold start per segment with less available context per segment. On a file where each
+segment exceeds `LIMIT`, only the first applies — which predicts further shrinkage, and
+that is a **prediction, not a measurement.**
+
+**This removes the largest blocker on the roadmap.** A verified full-`enwik8` round-trip
+was costed at 17 days and declared infeasible, blocked behind multi-week int8 determinism
+work. At 10.59× it is roughly a weekend, and needs no int8 at all.
+
+<details><summary>the original plan, for the record</summary>
+
 ### 3. Build lockstep decode properly — **days** ⭐ the only novel idea here
 
 "Decoding cannot be batched" is true *within* one stream and false *across* streams. A
@@ -169,6 +196,14 @@ segments. Not extrapolated further on purpose; trap 3 is about exactly that.
 This converts item 3.1 (full-enwik8 verified round-trip) from **17 days, declared
 infeasible** to roughly a weekend — **without** the multi-week int8 kernel project it was
 supposedly blocked behind.
+
+</details>
+
+### 3b. Now actually run the full-enwik8 verification — **~a weekend**
+
+Unblocked by the item above and by nothing else. Run it at S=16 with segments long enough
+that the ratio cost is the cold-start term only, and **measure** the penalty there rather
+than inheriting either the 3.97% or the pilot's discredited 2.6%.
 
 ### Do not start with int8
 

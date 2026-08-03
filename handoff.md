@@ -108,6 +108,31 @@ arXiv prose, which read as better generalisation. Adding a second unseen corpus 
 affinity. Without it, a 10-hour headline run would have been pointed at the wrong model on
 the strength of one 50 KB file. See `model_comparison_2026_08_03` in `results.json`.
 
+## Lockstep decode is real now, 2026-08-03
+
+`compress_lockstep` / `decompress_lockstep` in `llm_ptc.py`. S segments advance one token
+per step in one `[S,1]` forward. Byte-exact round-trip at **S=1, 2, 4, 8, 16**, decode
+**10.59× at S=16**. `decompress()` routes on a header bit, so callers need not care.
+
+Two invariants that are easy to break and will corrupt streams silently if broken:
+
+- **The batch shape must never change mid-stream.** A finished segment keeps being fed a
+  filler token instead of leaving the batch — dropping it reshapes the GEMM and changes
+  the numbers for every *surviving* row. Rows don't attend to each other, so batch
+  *content* is irrelevant; *shape* is the invariant.
+- **Segments differ in length by at most one token**, so they cross `LIMIT` on the same
+  step and the KV cache stays rectangular.
+
+The ratio cost is a function of segment length: **+9.08%** at 560-token segments,
+**+3.97%** at 2,221. The scratch pilot claimed 2.6% for the second and **that did not
+replicate** — quote 3.97%. Note also that at those sizes segments are shorter than
+`LIMIT`, so the figure mixes cold-start cost with reduced context; on a file where
+segments exceed `LIMIT` only the cold start applies. That is a prediction, not a
+measurement, and trap 3 is about the difference.
+
+**This unblocks the full-`enwik8` verification** — 17 days and "infeasible" becomes about a
+weekend, with no int8 work required.
+
 ## Traps that will bite you
 
 These all cost me real time. They are the most valuable part of this document.

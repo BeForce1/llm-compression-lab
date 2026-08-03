@@ -617,6 +617,73 @@
       },
       "reading": "4x the segment length cut the penalty 3.5x (8.9% -> 2.6%). That is the signature of a per-segment cold start being amortised over more tokens, and it rules out lost cross-segment matches as the main term - those would not shrink this fast with segment length. The cost of the technique is therefore a function of SEGMENT LENGTH, not of S.",
       "not_extrapolated": "Two points is a direction, not a curve. enwik8 at S=16 would give ~1.7M-token segments, ~770x longer than the 32 KB test, where the penalty should be far below 1% - but this repo has been burned by exactly that kind of extrapolation (trap 3), so it stays unmeasured until someone runs it."
-    }
+    },
+    "_SUPERSEDED": "Pilot only. Built for real in llm_ptc.py on 2026-08-03 - see lockstep_decode. Its ratio figures replicate; its size-dependence claim does not."
+  },
+  "lockstep_decode": {
+    "_about": "Shipped in llm_ptc.py as compress_lockstep/decompress_lockstep. S independent segments advance one token per step in a single [S,1] forward, each with its own KV cache, match bank, mixer and coder. decompress() routes on a header bit (LOCKSTEP_FLAG), so a caller does not need to know which encoder made a blob.",
+    "why_it_decodes_when_compress_batched_does_not": "compress_batched encoded with a [1,W] forward and decoded with [1,1]. Different GEMM shapes reduce floats in a different order, and it diverged at byte 253. Lockstep runs the SAME step-major loop in both directions, so both sides execute identical shapes in identical order and see bit-identical probabilities.",
+    "invariants": {
+      "constant_batch_shape": "A finished segment keeps being fed a filler token rather than leaving the batch. Dropping it would reshape the GEMM mid-stream and change the numbers for every SURVIVING row. Rows do not attend to each other, so batch content is irrelevant - shape is the thing that must not move.",
+      "equal_segment_lengths": "Segments differ by at most one token, so they all cross LIMIT on the same step, slide together, and keep the KV cache rectangular."
+    },
+    "round_trip": "byte-exact at S=1, 2, 4, 8, 16 on 8,192 B; and at S=4 on 32,768 B",
+    "speed_8192B": {
+      "_about": "alice29, LIMIT=8192 default. Speedup is against S=1 in the same run.",
+      "rows": [
+        {
+          "S": 1,
+          "bpb": 0.989,
+          "decode_B_per_s": 73,
+          "speedup": 1.0,
+          "ratio_cost": "0%"
+        },
+        {
+          "S": 4,
+          "bpb": 1.079,
+          "decode_B_per_s": 257,
+          "speedup": 3.5,
+          "ratio_cost": "+9.1%"
+        },
+        {
+          "S": 8,
+          "bpb": 1.18,
+          "decode_B_per_s": 469,
+          "speedup": 6.4,
+          "ratio_cost": "+19.2%"
+        },
+        {
+          "S": 16,
+          "bpb": 1.359,
+          "decode_B_per_s": 777,
+          "speedup": 10.59,
+          "ratio_cost": "+37.4%"
+        }
+      ]
+    },
+    "size_dependence": {
+      "_about": "The load-bearing claim: does the cost shrink with SEGMENT LENGTH? Same S=4, same corpus, 4x the segment length.",
+      "rows": [
+        {
+          "sample_bytes": 8192,
+          "segment_tokens": 560,
+          "S1_bpb": 0.989,
+          "S4_bpb": 1.079,
+          "penalty_pct": 9.08
+        },
+        {
+          "sample_bytes": 32768,
+          "segment_tokens": 2221,
+          "S1_bpb": 0.953,
+          "S4_bpb": 0.991,
+          "penalty_pct": 3.97
+        }
+      ],
+      "reading": "4x the segment length cut the penalty 2.29x. The direction is confirmed with the real implementation.",
+      "pilot_did_not_replicate": "The scratch pilot measured this same step as 8.9% -> 2.6%, a 3.5x reduction. The shipped implementation measures 9.08% -> 3.97%, a 2.29x reduction. The 8 KB figures agree to 0.2 points; the 32 KB one is 1.4 points worse than the pilot claimed. Quote 3.97%.",
+      "two_costs_are_conflated_here": "At both sample sizes the segments (560 and 2,221 tokens) are SHORTER than LIMIT=8192, so a segment never fills its context window. The measured penalty therefore mixes two effects: one cold start per segment, and less available context per segment. On a file large enough that each segment exceeds LIMIT, only the first applies. That predicts the penalty keeps shrinking - but it is a PREDICTION, and trap 3 exists because this project keeps promoting those to findings.",
+      "not_extrapolated": "Two points are a direction, not a curve. enwik8 at S=16 would give ~1.7M token segments, ~766x longer than the 32 KB test. Do not compute what the penalty would be there - measure it."
+    },
+    "what_this_unblocks": "Long_Time_Tests 3.1, a verified full-enwik8 round-trip, was costed at 17 days and declared infeasible, blocked behind multi-week int8 determinism work. At S=16 decode measured 10.59x. That is roughly a weekend, and it needs no int8 at all - the largest single blocker on the roadmap, removed by ~130 lines."
   }
 }

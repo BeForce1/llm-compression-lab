@@ -89,6 +89,25 @@ constant.** 8.74× vs raw, 2.79× vs `xz -9`, 19.9% under ts_zip.
   ~180 days to **481 days** of continuous reading. Both unusable; quote the ratio with this
   attached.
 
+## The model table was retired, 2026-08-03
+
+`model_comparison` ran every row at `LIMIT=1024` on `alice29`. Fair for GPT-2 vs SmolLM2
+(1024 is GPT-2's maximum), so **the 45% model finding stands**. Not fair to Qwen3-0.6B,
+which was the **instruct** checkpoint at 1/32 of its native context on a benchmark the
+winner had memorised. Re-run at matched sample and context, three claims changed:
+
+| | |
+|---|---|
+| base beats instruct | **confirmed** — −16.7% / −14.6%. Was listed as untested. |
+| bigger loses | **refuted** — SmolLM2 135M → 360M is −13% at every context, on every corpus |
+| unseen text costs 38%, and that is memorisation | **refuted** — it is *genre*. Holding genre constant the cost is −0.8% to +5.7%; the 25–30% cliff is narrative→technical |
+
+**The control that mattered cost an hour.** Qwen3-Base beat SmolLM2-360M by 12.2% on unseen
+arXiv prose, which read as better generalisation. Adding a second unseen corpus that was
+*narrative* rather than technical turned that into a 0.7% loss — the advantage was genre
+affinity. Without it, a 10-hour headline run would have been pointed at the wrong model on
+the strength of one 50 KB file. See `model_comparison_2026_08_03` in `results.json`.
+
 ## Traps that will bite you
 
 These all cost me real time. They are the most valuable part of this document.

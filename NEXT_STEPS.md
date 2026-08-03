@@ -89,6 +89,24 @@ here — on text the model has read, context is redundant with the weights.
 Default now 8192, clamped per model. Cost: encode 87 → 32 B/s. Taken, because ratio is
 this codec's only deliverable and its speed was already far past usable.
 
+### ~~2. Run the model A/Bs~~ — **DONE 2026-08-03.** Three claims died
+
+| tested at matched sample and context | outcome |
+|---|---|
+| base beats instruct | **confirmed** — −16.7% alice29, −14.6% arXiv |
+| bigger loses (the recorded finding) | **refuted** — 135M → 360M is −13%, everywhere |
+| Qwen3-Base generalises better to unseen text | **refuted by a genre control** — its 12.2% arXiv win is a 0.7% loss on unseen narrative |
+| unseen text costs ~38%, and that is memorisation | **refuted** — genre held constant, it costs −0.8% to +5.7% |
+
+Full matrix in `results.json` → `model_comparison_2026_08_03`. Still open:
+**`gemma-3-270m` is a gated repo** (needs a licence acceptance + `HF_TOKEN`), so the
+big-vocab counter-test is untested; **Qwen3-Base never reached its context** — native
+32,768, tested to 4096, still improving, capped by 4.3 GB of RAM not by the model; and the
+genre control needs **post-cutoff fiction** to be airtight, since Victorian narrative vs
+2026 journalism is two narrative genres rather than one.
+
+<details><summary>the original plan, for the record</summary>
+
 ### 2. Run the model A/Bs — **~1 hour each** ⭐ now the best value per hour
 
 The model is worth 45%; everything hand-built is worth ~1%. Unblocked by the
@@ -113,6 +131,22 @@ maximum, and report the LIMIT beside every figure.
 1.6 GB for SmolLM2 at 8192, but **5.0 GB for Qwen3's 151,936 vocab** and ~8.6 GB for
 Gemma's 262,144. This box has 15.7 GB with ~2.4 GB typically free. Cap `LLM_PTC_LIMIT` for
 the wide-vocab models or use the sequential path, and *say which* in the results.
+
+</details>
+
+### 2b. The headline is now pointed at the wrong model — **7–10 h**
+
+`SmolLM2-360M` beats the headline model by **13%** on `alice29` at every context tested
+(0.812 vs 0.934 at 8192, on 65,536 B). A naive scaling of the verified 0.915 full-file
+figure lands near **0.80 bpb**, which would be ~10× versus raw and ~3.2× versus `xz -9`.
+
+**That number is an extrapolation and must not be quoted until it is run** — trap 3 is
+about precisely this, and it has already caught this project twice today. What it needs is
+a full-file sequential encode *and* decode at the new model, same as the 0.915 run.
+
+Price it honestly first: 360M is 2.7× the parameters, so it is slower than the 32 B/s that
+already put break-even at 481 days, and the model on disk grows from 272 MB to ~720 MB.
+The ratio improves and the economics get worse again.
 
 ### 3. Build lockstep decode properly — **days** ⭐ the only novel idea here
 

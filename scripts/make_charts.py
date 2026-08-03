@@ -88,13 +88,42 @@ def chart_headline():
          rows, note='green = this repo   brown = published rival   grey = classical baseline')
 
 
+CORPORA = [('alice29', 'alice29\n(memorised, narrative)'),
+           ('news', 'news 2026\n(unseen, narrative)'),
+           ('arxiv', 'arXiv 2026\n(unseen, technical)')]
+
+
+def _matched():
+    """The 3x3: same 50,757 B, same LIMIT=2048, only model and genre vary."""
+    return DATA['model_comparison_2026_08_03']['matched_50757B_limit2048']['bpb']
+
+
 def chart_models():
-    m = DATA['model_comparison']['models']
-    rows = [(f"{x['name']}  ({x['params_m']}M, {x['kind']})", x['bpb'], OURS) for x in m]
-    rows.sort(key=lambda t: t[1])
-    barh('chart_models.svg',
-         'Same coder, same 8 KB, only the model changes',
-         rows, note='A 135M base model beats a 600M instruct model. Data and calibration beat size.')
+    """Grouped by corpus, because the model ranking INVERTS between them - which
+    a single-corpus bar chart would hide, and did."""
+    bpb = _matched()
+    models = [k for k in bpb if k != 'xz -9 (control)']
+    fig, ax = _fig(h=3.4)
+    w = 0.26
+    for j, m in enumerate(models):
+        off = (j - (len(models) - 1) / 2) * w
+        vals = [bpb[m][k] for k, _ in CORPORA]
+        ax.bar([i + off for i in range(len(CORPORA))], vals, w,
+               color=[OURS, RIVAL, BASE][j], label=m, zorder=3)
+        for i, v in enumerate(vals):
+            ax.text(i + off, v + 0.02, f'{v:.3f}', ha='center', color=INK, fontsize=7.5)
+    ax.set_xticks(range(len(CORPORA)))
+    ax.set_xticklabels([lab for _, lab in CORPORA], color=INK, fontsize=9)
+    ax.yaxis.grid(True, color=GRID, zorder=0, linewidth=0.8)
+    ax.set_ylabel('bits per byte', color=MUTED, fontsize=9)
+    ax.set_ylim(0, max(max(v.values()) for v in bpb.values() if max(v.values()) < 2) * 1.25)
+    ax.legend(frameon=False, fontsize=8.5, labelcolor=INK, ncol=3, loc='upper left')
+    ax.set_title('Same coder, same 50,757 B, fair context - only the model changes',
+                 color=INK, fontsize=11.5, loc='left', pad=24, fontweight='bold')
+    ax.text(0, 1.0, 'The ranking inverts: SmolLM2-360M wins on narrative, Qwen3-0.6B-Base '
+                    'wins on technical prose. Benchmarking on one corpus picks the wrong model.',
+            transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
+    _save(fig, 'chart_models.svg')
 
 
 def chart_ablation():
@@ -118,36 +147,42 @@ def chart_ablation():
 
 
 def chart_contamination():
-    c = DATA['contamination_test']
-    fig, ax = _fig(h=3.2)
-    groups = ['alice29\n(likely memorised)', 'post2026 arXiv\n(definitely unseen)']
-    ours = [c['alice29_likely_memorised']['llm_ptc'], c['post2026_definitely_unseen']['llm_ptc']]
-    xz = [c['alice29_likely_memorised']['xz -9'], c['post2026_definitely_unseen']['xz -9']]
-    x = range(len(groups))
+    """The decomposition that retired this repo's own memorisation claim.
+
+    Two moves per model, from the same 3x3: memorised -> unseen with genre held
+    roughly constant, and narrative -> technical with both unseen. The first was
+    reported as a 38% memorisation penalty; it is the second.
+    """
+    bpb = _matched()
+    models = [k for k in bpb if k != 'xz -9 (control)']
+    fig, ax = _fig(h=3.3)
     w = 0.34
-    ax.bar([i - w / 2 for i in x], ours, w, color=OURS, label='llm_ptc', zorder=3)
-    ax.bar([i + w / 2 for i in x], xz, w, color=BASE, label='xz -9 (control)', zorder=3)
-    for i, (o, z) in enumerate(zip(ours, xz)):
-        ax.text(i - w / 2, o + 0.05, f'{o:.3f}', ha='center', color=INK, fontsize=9, fontweight='bold')
-        ax.text(i + w / 2, z + 0.05, f'{z:.3f}', ha='center', color=INK, fontsize=9)
-        ax.text(i, max(o, z) + 0.28, f'{z / o:.2f}x advantage', ha='center',
-                color=OURS, fontsize=9.5, fontweight='bold')
+    seen = [100 * (bpb[m]['news'] - bpb[m]['alice29']) / bpb[m]['alice29'] for m in models]
+    genre = [100 * (bpb[m]['arxiv'] - bpb[m]['news']) / bpb[m]['news'] for m in models]
+    x = range(len(models))
+    ax.bar([i - w / 2 for i in x], seen, w, color=OURS, zorder=3,
+           label='memorised -> unseen  (genre held)')
+    ax.bar([i + w / 2 for i in x], genre, w, color=BAD, zorder=3,
+           label='narrative -> technical  (both unseen)')
+    for i, (s, g) in enumerate(zip(seen, genre)):
+        ax.text(i - w / 2, s + (0.8 if s >= 0 else -2.2), f'{s:+.1f}%',
+                ha='center', color=INK, fontsize=8.5, fontweight='bold')
+        ax.text(i + w / 2, g + 0.8, f'{g:+.1f}%', ha='center', color=INK,
+                fontsize=8.5, fontweight='bold')
+    ax.axhline(0, color=MUTED, linewidth=0.8, zorder=4)
     ax.set_xticks(list(x))
-    ax.set_xticklabels(groups, color=INK, fontsize=9.5)
+    ax.set_xticklabels(models, color=INK, fontsize=9)
     ax.yaxis.grid(True, color=GRID, zorder=0, linewidth=0.8)
-    ax.yaxis.set_major_locator(MultipleLocator(1))
-    ax.set_ylabel('bits per byte', color=MUTED, fontsize=9)
-    ax.set_ylim(0, max(ours + xz) * 1.35)
-    ax.set_title('Is it compression or memorisation?', color=INK, fontsize=11.5,
-                 loc='left', pad=22, fontweight='bold')
-    ax.text(0, 1.0, 'xz cannot memorise, so a surviving advantage over it is real. '
-                    f'It survives - but shrinks from '
-                    f'{c["alice29_likely_memorised"]["advantage_over_xz"]:.2f}x to '
-                    f'{c["post2026_definitely_unseen"]["advantage_over_xz"]:.2f}x.',
+    ax.set_ylabel('bpb penalty (%)', color=MUTED, fontsize=9)
+    ax.set_ylim(min(seen) - 5, max(genre) * 1.35)
+    # Upper right: the tallest bar is the leftmost one, and at upper left the
+    # legend's second row lands exactly on its value label.
+    ax.legend(frameon=False, fontsize=8.5, labelcolor=INK, loc='upper right')
+    ax.set_title('The "memorisation" penalty was genre', color=INK, fontsize=11.5,
+                 loc='left', pad=24, fontweight='bold')
+    ax.text(0, 1.0, 'Never having seen the text costs -0.8% to +5.7%. The 25-30% cliff is '
+                    'technical prose, not familiarity. Same 50,757 B, same context.',
             transform=ax.transAxes, color=MUTED, fontsize=8, va='bottom')
-    leg = ax.legend(frameon=False, fontsize=9, loc='upper right')
-    for t in leg.get_texts():
-        t.set_color(MUTED)
     _save(fig, 'chart_contamination.svg')
 
 

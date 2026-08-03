@@ -151,20 +151,29 @@ Same coder, same 8 KB sample, same context budget. Only the model changes:
 | Qwen3-0.6B (instruct) | 600M | 1.110 | 23 B/s | 1,519 MB |
 | GPT-2 124M (base) | 124M | 1.821 | 41 B/s | 551 MB |
 
-Two things fall out of this table:
+**Finding 1 stands. Finding 2 was wrong, and the table above is retired.**
 
 1. **Training data beats parameter count.** SmolLM2-135M has essentially the same
    parameter count as GPT-2 124M and compresses **45.6% better**. Same size, ~1000× the
-   training tokens.
-2. **Bigger lost.** Qwen3-0.6B has 4.4× SmolLM2's parameters and is worse on every axis
-   — ratio, speed and disk. Two untested hypotheses for why: its 151K vocabulary spends
-   capacity on 100+ languages English prose can't use, and it is instruction/reasoning
-   post-trained, which is known to decalibrate raw next-token distributions. If the
-   second holds, **base models compress better than instruct models** — directly
-   testable with `Qwen3-0.6B-Base`.
+   training tokens. This comparison was fair — 1024 is GPT-2's *maximum* context, so both
+   models sat at a real ceiling.
+2. ~~**Bigger lost.**~~ **Retired 2026-08-03.** The Qwen3 row stacked three handicaps on
+   the loser: it was the **instruct** checkpoint, at `LIMIT=1024` against a **32,768**-token
+   native context, on a benchmark the winner had memorised. Re-run fairly, it wins.
 
-For scale: swapping the model was worth **45%**. Every hand-built modelling improvement
-in this repo, combined, is worth about **1%**.
+Both hypotheses offered for "why bigger lost" were testable, and one of them was right:
+
+| tested at matched sample and `LIMIT` | result |
+|---|---|
+| **base beats instruct** | **confirmed** — Qwen3-0.6B-Base vs instruct: **−16.7%** on alice29, **−14.6%** on arXiv |
+| **bigger loses** | **refuted** — SmolLM2 135M → 360M is **−13%**, consistently, at every context and on every corpus |
+| big vocabulary wastes capacity | still untested; needs `gemma-3-270m`, which is a gated repo |
+
+For scale, and this is the finding rather than a disclaimer: **swapping the model was worth
+45%; a bigger sibling is worth another 13%; using the base rather than instruct checkpoint
+is worth 15%. Every hand-built modelling improvement in this repo, combined, is worth about
+1%.** The full fair-context matrix is in
+[`results.json`](results/results.json) under `model_comparison_2026_08_03`.
 
 ---
 
@@ -182,27 +191,43 @@ so an advantage that survives against `xz` is real.**
 | alice29 — likely memorised | 0.972 | 2.881 | **2.96×** |
 | post-2026 arXiv — definitely unseen | 1.338 | 2.844 | **2.13×** |
 
-**The advantage is real but the headline was flattered.** 2.13× over `xz` on genuinely
-unseen text is a substantial, honest result. But absolute performance drops 38%, and
-note the control: `xz` scores nearly *identically* on both files (2.881 vs 2.844), so
-they have comparable dictionary-level redundancy — yet the model finds alice29 far
-easier. That asymmetry is the fingerprint of familiarity.
+That looked like the fingerprint of familiarity: `xz` scores nearly identically on both
+files (2.881 vs 2.844), so they have comparable dictionary-level redundancy, yet the model
+finds alice29 far easier. The README used to call the 38% gap memorisation, while noting
+genre as a partial confound.
 
-Genre is a partial confound (dense technical prose is harder than Victorian narrative
-for any model), so this doesn't cleanly separate memorisation from difficulty.
+**It was the confound. Measured 2026-08-03 by adding a second unseen corpus that is
+*narrative* rather than technical** — Wikinews articles from 2026, same 50,757 bytes, same
+`LIMIT`, so genre is the only thing that moves:
 
-> **Updated 2026-08-03.** That table is at `LIMIT=1024`, the old default. Raising it to
-> 8192 helps unseen text far more than memorised text — post2026 goes **1.331 → 1.181 bpb**
-> (batched), a **−11.3%** the alice29 side cannot match at −2.5%. Correcting for the 0.5%
-> batched-vs-sequential gap measured on this file, **the number to quote for unseen prose
-> is now ~1.19 bpb, and the honest advantage over `xz` is ~2.40×** rather than 2.13×.
-> The alice29 half has *not* been re-run on this 50,757 B slice, so the two columns above
-> are no longer a matched pair — re-run both before quoting the ratio *between* them.
+| bpb, 50,757 B each | alice29 *memorised, narrative* | news 2026 *unseen, narrative* | arXiv 2026 *unseen, technical* |
+|---|---:|---:|---:|
+| SmolLM2-135M | 0.961 | 0.966 | 1.260 |
+| SmolLM2-360M | **0.836** | **0.884** | 1.105 |
+| Qwen3-0.6B-Base | 0.897 | 0.890 | **0.970** |
+| `xz -9` | 2.881 | 3.056 | 2.844 |
 
-That asymmetry is itself the cleanest evidence in this repo that memorisation is doing
-real work: on text the model has read, extra context is largely redundant with what is
-already in the weights, so it buys little. On text it has never seen, in-document
-notation and terminology is the only thing it has, and context is worth 4× more.
+| moving from → to | 135M | 360M | Qwen3-Base |
+|---|---:|---:|---:|
+| **memorised → unseen**, genre held | **+0.52%** | +5.74% | **−0.78%** |
+| **narrative → technical**, both unseen | +30.4% | +25.0% | +9.0% |
+
+**The penalty for never having seen the text is between −0.8% and +5.7%.** Normalised
+against `xz` — which absorbs how compressible each file intrinsically is — all three models
+score *better* on the unseen file than the memorised one. The 25–30% cliff sits entirely on
+the narrative→technical axis. Qwen3-Base is actually **better** on text published after its
+own training cutoff than on *Alice in Wonderland*.
+
+Two things this does and does not license. It does **not** show `alice29` is unmemorised —
+it shows memorisation buys no measurable advantage over comparable unseen prose, which is a
+different and more interesting claim. And genre is only *roughly* controlled: Victorian
+fiction against 2026 journalism is two narrative genres, not one. The clean experiment
+needs post-cutoff **fiction** under a redistributable licence, which is genuinely hard to
+obtain — that is the honest limit here.
+
+**The number to quote for unseen prose is ~0.89 bpb on narrative and ~0.97 on technical**
+(SmolLM2-360M and Qwen3-0.6B-Base respectively, at `LIMIT=2048`), against 2.88–3.06 for
+`xz`. The old single figure of 1.34 was one genre, one model, and one context length.
 
 ---
 
@@ -324,6 +349,9 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | prediction | outcome | what actually happened |
 |---|---|---|
 | bf16 weights will be ~2× faster — the checkpoint is 16-bit and we're bandwidth-bound | **refuted** | 64 vs 84 B/s, *slower*. No AVX512-BF16 on this CPU, so torch converts to fp32 per matmul and we pay conversion on top. |
+| Qwen3-0.6B-Base generalises better to unseen text (it beat SmolLM2-360M by 12.2% on unseen arXiv prose) | **refuted by a genre control** | On unseen *narrative* it loses to the same model by 0.7%. The advantage is affinity for technical prose, not generalisation — and one unseen corpus in one genre could not tell those apart. |
+| unseen text costs ~38%, and that gap is memorisation | **refuted** | Holding genre constant it costs −0.8% to +5.7%. The cliff is narrative→technical, not memorised→unseen. |
+| bigger models lose (Qwen3-0.6B vs SmolLM2-135M) | **refuted — three handicaps on one row** | instruct checkpoint, 1/32 of its context, contaminated benchmark. Run fairly, bigger wins. |
 | the gap to ts_zip is mostly our 512-token context resets | **refuted, then the refutation was too** | Sweeping context 256→1024 moved GPT-2's bpb by −0.7%. But 1024 *is* GPT-2's maximum, so that measured a ceiling and called it a property of context. Swept properly on SmolLM2 to its native 8192: **−2.5% on alice29, −11.3% on unseen text.** "The gap was the model" is still right about ts_zip; "context barely matters" was never measured. |
 | blending a match prediction into the LLM will help on repetitive markup | **refuted as written** | Linear interpolation measured 2% worse. Re-doing it as logistic mixing with learned weights then gave −1.2%. |
 | 12-bit probability quantisation costs ratio | **inverted** | It *gains* 5.3% against GPT-2 by smoothing an overconfident model. |

@@ -122,7 +122,94 @@
         "disk_mb": 272,
         "kind": "base"
       }
-    ]
+    ],
+    "retired_2026_08_03": "RETIRED. Every row ran at LIMIT=1024 on alice29 with an 8,192-byte sample. That was fair for GPT-2 vs SmolLM2 (1024 is GPT-2 maximum, so both sat at a real ceiling) and the 45% model finding stands. It was not fair to Qwen3-0.6B, which was the INSTRUCT checkpoint at 1/32 of its native context on a benchmark the winner had memorised - three handicaps on one row. See model_comparison_2026_08_03."
+  },
+  "model_comparison_2026_08_03": {
+    "_about": "Supersedes model_comparison, which is retained but retired - see its retired_2026_08_03 field. Every cell here is batched encode, same coder, stated sample size and LIMIT. The old table ran every model at LIMIT=1024 on contaminated alice29, which handicapped Qwen3 (native context 32,768) by 32x and rewarded whichever model had memorised the benchmark.",
+    "corpora": {
+      "alice29.txt": "Victorian fiction, public domain since 1865 - in every training set. NARRATIVE, MEMORISED.",
+      "post2026.txt": "arXiv paper prose, post-cutoff. TECHNICAL, UNSEEN. sha256 20b192d7...",
+      "post2026_news.txt": "Wikinews articles dated 2026-01 to 2026-05, CC BY, post-cutoff, == Sources == boilerplate stripped (it was 20.6% of the first attempt and a citation list is structurally closer to arXiv references than to narrative). NARRATIVE, UNSEEN. sha256 51f5badb..."
+    },
+    "matched_50757B_limit2048": {
+      "_about": "The controlled 3x3. Identical 50,757 B from each corpus, identical LIMIT. Only model and genre vary.",
+      "bpb": {
+        "SmolLM2-135M": {
+          "alice29": 0.961,
+          "news": 0.966,
+          "arxiv": 1.26
+        },
+        "SmolLM2-360M": {
+          "alice29": 0.836,
+          "news": 0.884,
+          "arxiv": 1.105
+        },
+        "Qwen3-0.6B-Base": {
+          "alice29": 0.897,
+          "news": 0.89,
+          "arxiv": 0.97
+        },
+        "xz -9 (control)": {
+          "alice29": 2.881,
+          "news": 3.056,
+          "arxiv": 2.844
+        }
+      },
+      "advantage_over_xz": {
+        "SmolLM2-135M": {
+          "alice29": 3.0,
+          "news": 3.16,
+          "arxiv": 2.26
+        },
+        "SmolLM2-360M": {
+          "alice29": 3.45,
+          "news": 3.46,
+          "arxiv": 2.57
+        },
+        "Qwen3-0.6B-Base": {
+          "alice29": 3.21,
+          "news": 3.43,
+          "arxiv": 2.93
+        }
+      }
+    },
+    "other_points": {
+      "_about": "Not part of the matched 3x3 - different sample size (65,536 B alice29 / 50,757 B post2026) or different LIMIT. Do not compare across sample sizes (trap 2).",
+      "alice29_65536B": {
+        "135M@2048": 0.946,
+        "135M@4096": 0.938,
+        "135M@8192": 0.934,
+        "360M@2048": 0.823,
+        "360M@8192": 0.812,
+        "Qwen3-Base@2048": 0.884,
+        "Qwen3-Base@4096": 0.873,
+        "Qwen3-0.6B-instruct@2048": 1.061
+      },
+      "post2026_50757B": {
+        "135M@2048": 1.26,
+        "135M@4096": 1.22,
+        "135M@8192": 1.181,
+        "360M@2048": 1.105,
+        "360M@8192": 1.022,
+        "Qwen3-Base@2048": 0.97,
+        "Qwen3-Base@4096": 0.918,
+        "Qwen3-0.6B-instruct@2048": 1.136
+      }
+    },
+    "findings": {
+      "model_size_pays": "SmolLM2-135M -> 360M is -13.0% on alice29 and -12.3 to -13.5% on unseen text, measured at both 2048 and 8192. Four measurements within half a point of each other. That single sibling swap beats the entire context sweep and is ~13x everything hand-built in this repo combined.",
+      "base_beats_instruct": "CONFIRMED, and it was listed as untested. Qwen3-0.6B-Base vs the instruct checkpoint at identical LIMIT and sample: -16.7% on alice29, -14.6% on arXiv. An instruction-tuned model is optimised for a conditional distribution that is not \"predict this corpus\".",
+      "qwen3_generalisation_REFUTED": "Qwen3-Base beat SmolLM2-360M by 12.2% on unseen arXiv prose, which looked like better generalisation. The genre control kills it: on unseen NARRATIVE it loses to the same model by 0.7%. The advantage is affinity for technical prose - Qwen3 trains on far more code and technical text - not generalisation. One unseen corpus in one genre could not tell those apart, and the wrong reading would have pointed a 10-hour headline run at the wrong model.",
+      "contamination_penalty_is_mostly_GENRE": "The headline claim that unseen text costs ~38% does not survive a genre control. Holding genre roughly constant (memorised Victorian narrative -> unseen 2026 news narrative), the cost is +0.52% for 135M, +5.74% for 360M, and -0.78% for Qwen3-Base - the last is BETTER on text it has never seen. Normalised against xz, which absorbs how compressible each file intrinsically is, all three do better on the unseen file. The 25-30% drop appears only on the narrative -> technical axis. This does NOT show alice29 is unmemorised; it shows memorisation buys no measurable advantage over comparable unseen prose.",
+      "qwen3_is_the_genre_robust_one": "Spread between best and worst corpus: Qwen3-Base 9.0%, SmolLM2-135M 31.1%, SmolLM2-360M 32.2%. Lowest bpb and most predictable bpb are different properties, and for unknown input the second may matter more."
+    },
+    "caveats": {
+      "genre_is_only_roughly_controlled": "alice29 is Victorian fiction and the news file is 2026 journalism. Both narrative, not the same genre. The clean experiment needs post-cutoff FICTION, which is hard to obtain under a redistributable licence.",
+      "xz_normalisation_is_a_proxy": "Using xz bpb to normalise assumes it measures intrinsic compressibility fairly across genres. Reasonable, not proven.",
+      "gemma_untested": "google/gemma-3-270m is a gated repo and needs a licence acceptance plus HF_TOKEN. The big-vocab counter-test is still open.",
+      "qwen3_never_reached_its_context": "Native context 32,768, tested to 4096, still improving (-5.4% from 2048 to 4096 on arXiv). At 4096 the process holds 4.3 GB - 2.4 GB of fp32 weights plus 2.5 GB of logits - against ~2.4 GB typically free here. Memory-capped, not model-capped."
+    }
   },
   "headline_alice29": {
     "_about": "Full alice29.txt, 152089 bytes. VERIFIED round-trip as of 2026-08-03: sequential encode+decode of the whole file at the shipped defaults, which now means LIMIT=8192. Supersedes the 0.940 measured at LIMIT=1024, kept below under superseded_2026_07_31. The 32/34 B/s pair is the first throughput this project has measured on an idle box over a full file - every earlier figure was either contended or inflated by a sample barely larger than LIMIT.",

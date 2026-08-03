@@ -7,8 +7,12 @@ truncated download would silently produce wrong benchmark numbers.
 """
 import hashlib
 import io
+import json
 import os
+import re
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -138,11 +142,95 @@ def fetch_post2026():
               '        not be directly comparable to the figure in the README.')
 
 
+NEWS_SHA = '51f5badb611f9a1a7222fa5ffe96ce545d5c26e3e28ba161e1652a622484f2f4'
+NEWS_API = 'https://en.wikinews.org/w/api.php'
+
+
+def fetch_post2026_news():
+    """The GENRE control: post-cutoff prose that is narrative, not technical.
+
+    post2026.txt is arXiv. Qwen3 trains on far more technical text than SmolLM2,
+    so on that file alone "generalises better" and "likes this genre" predict the
+    same result - and they imply opposite advice. This file separates them, and
+    it did: Qwen3-Base's 12.2% win on arXiv is a 0.7% loss here.
+
+    Wikinews, CC BY. Sized to exactly 50,757 B to match post2026.txt so the two
+    unseen corpora differ in genre and nothing else (trap 2). Not committed: CC BY
+    needs attribution this repo would have to carry, and corpus/ is gitignored.
+
+    The sha is unlikely to reproduce - it depends on which articles are newest at
+    fetch time - so a mismatch means your bpb is not comparable to the recorded
+    one, not that anything is broken.
+    """
+    import time
+    dst = os.path.join(CORPUS, 'post2026_news.txt')
+    if os.path.exists(dst):
+        got = hashlib.sha256(open(dst, 'rb').read()).hexdigest()
+        print(f'have post2026_news.txt{"" if got == NEWS_SHA else "  <- differs from recorded"}')
+        return
+
+    def api(**kw):
+        kw.setdefault('format', 'json')
+        kw.setdefault('action', 'query')
+        url = NEWS_API + '?' + urllib.parse.urlencode(kw)
+        delay = 2.0
+        for attempt in range(6):
+            try:
+                r = json.load(urllib.request.urlopen(urllib.request.Request(
+                    url, headers={'User-Agent': 'llm-compression-lab'}), timeout=90))
+                time.sleep(0.6)           # explaintext is 1 article per request
+                return r
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or attempt == 5:
+                    raise
+                time.sleep(delay)
+                delay *= 2
+
+    print('fetching Wikinews 2026 articles ...')
+    members, cont = [], {}
+    while len(members) < 300:
+        r = api(list='categorymembers', cmtitle='Category:Published', cmsort='timestamp',
+                cmdir='desc', cmlimit=100, cmprop='title|timestamp', **cont)
+        members += r['query']['categorymembers']
+        if 'continue' not in r:
+            break
+        cont = r['continue']
+    parts = []
+    for m in (x for x in members if x['timestamp'] >= '2026-01-01'):
+        r = api(prop='extracts', explaintext=1, titles=m['title'], redirects=1)
+        t = next(iter(r['query']['pages'].values())).get('extract', '')
+        # Drop == Sources == and friends: they were 20.6% of the first attempt,
+        # and a citation list is structurally closer to arXiv's reference section
+        # than to narrative - which would blunt the very contrast this file exists
+        # to create.
+        t = re.sub(r'\n=+ ?(Sources|Related news|External links|References|See also)'
+                   r' ?=+.*?(?=\n=+ ?[A-Z]|\Z)', '', t, flags=re.S)
+        t = ''.join(c for c in t if ord(c) < 128)
+        t = re.sub(r'[ \t]+', ' ', t)
+        t = re.sub(r'(\r?\n\s*){2,}', '\n\n', t).strip()
+        if len(t) > 400:                                  # skip stubs and redirects
+            parts.append(t)
+        if sum(len(x) + 2 for x in parts) > 50_757 * 1.15:
+            break
+    data = '\n\n'.join(parts).encode('ascii')
+    if len(data) < 50_757:
+        sys.exit(f'  only {len(data):,} B of 2026 Wikinews available, need 50,757')
+    data = data[:50_757]
+    open(dst, 'wb').write(data)
+    got = hashlib.sha256(data).hexdigest()
+    print(f'  post2026_news.txt: {len(data):,} bytes from {len(parts)} articles')
+    if got != NEWS_SHA:
+        print(f'  NOTE: sha256 {got[:16]}... != recorded {NEWS_SHA[:16]}...\n'
+              '        Expected - the newest articles change. Your bpb is not\n'
+              '        directly comparable to the recorded genre-control figures.')
+
+
 if __name__ == '__main__':
     os.makedirs(CORPUS, exist_ok=True)
     for url, members in ZIPS.items():
         fetch(url, members)
     slice_enwik8()
     fetch_post2026()
+    fetch_post2026_news()
     print('\ncorpus ready. Nothing here is committed to the repo - these are other '
           'people\'s texts under their own licences.')

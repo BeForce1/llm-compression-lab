@@ -73,6 +73,7 @@ _WINDOW_SET = 'LLM_PTC_WINDOW' in os.environ          # honour an explicit choic
 #   + APM/SSE at 75% weight ............. 0.926        887      actively harmful
 ORDERS = [int(x) for x in os.environ.get('LLM_PTC_ORDERS', '4').split(',') if x]
 BATCHED_FLAG = 1 << 31                # header bit: measured by compress_batched
+LOCKSTEP_FLAG = 1 << 30               # header bit: S-segment stream, decodable
 MAXLEN = 31                           # match length doubles as a confidence bucket
 MMASK = (1 << 22) - 1                 # match index size
 # OFF by default, and that is a result not an oversight: SSE exists to fix a
@@ -468,11 +469,137 @@ def compress_batched(data):
     return (BATCHED_FLAG | len(ids)).to_bytes(4, 'big') + enc.finish()
 
 
+class _LockPredictor:
+    """S independent segments advanced together, one [S,1] forward per step.
+
+    The batch dimension carries unrelated segments, not one sequence. Rows do not
+    attend to each other, so a row's distribution is exactly what it would be
+    alone AT THE SAME BATCH SHAPE - and shape is the thing that must not move,
+    since it decides the GEMM's float reduction order. That is why a finished
+    segment keeps being fed a filler token rather than being dropped from the
+    batch: dropping it would reshape the GEMM and change the numbers for every
+    surviving row.
+
+    All S segments are fed one token per step from the same starting point, so
+    they cross LIMIT on the same step and slide together, which keeps the KV
+    cache rectangular. Segment lengths differ by at most 1 for the same reason.
+    """
+
+    def __init__(self, S):
+        self.tok, self.model = _load()
+        self.S = S
+        self.past = None
+        self.ids = [[] for _ in range(S)]
+
+    def feed(self, toks):
+        """Advance every segment one token; return an [S, vocab] distribution."""
+        for s, t in enumerate(toks):
+            self.ids[s].append(t)
+        if len(self.ids[0]) > LIMIT:
+            self.ids = [x[-WINDOW:] for x in self.ids]
+            out = self.model(input_ids=torch.tensor(self.ids), use_cache=True)
+        else:
+            out = self.model(input_ids=torch.tensor([[t] for t in toks]),
+                             past_key_values=self.past, use_cache=True)
+        self.past = out.past_key_values
+        return torch.softmax(out.logits[:, -1].double(), -1).numpy()
+
+
+def _segments(n, S):
+    """Start offset and length per segment, as equal as possible.
+
+    Equal lengths are not cosmetic: they keep every segment sliding on the same
+    step, and they bound the filler steps at the tail to at most one per segment.
+    """
+    base, rem = divmod(n, S)
+    lens = [base + (1 if i < rem else 0) for i in range(S)]
+    starts, acc = [], 0
+    for L in lens:
+        starts.append(acc)
+        acc += L
+    return starts, lens
+
+
+def _lockstep(data_or_blob, S=None, decode=False):
+    """One step-major loop, used for BOTH directions.
+
+    That shared loop is the whole point. compress_batched encoded with a [1, W]
+    forward and decoded with [1, 1], so the two sides reduced floats in different
+    orders and diverged at byte 253. Here both sides run [S, 1] forwards, the same
+    number of them, in the same order - so they see bit-identical probabilities
+    and the stream actually decodes.
+    """
+    tok, model = _load()
+    vocab = model.config.vocab_size
+    if decode:
+        blob = data_or_blob
+        n = int.from_bytes(blob[:4], 'big') & ~LOCKSTEP_FLAG
+        S = blob[4]
+        sizes = [int.from_bytes(blob[5 + 4 * i:9 + 4 * i], 'big') for i in range(S)]
+        off, coders = 5 + 4 * S, []
+        for sz in sizes:
+            coders.append(ptc.Decoder(blob[off:off + sz]))
+            off += sz
+        ids = [0] * n
+    else:
+        ids = _encode_ids(tok, data_or_blob)
+        n = len(ids)
+        coders = [ptc.Encoder() for _ in range(S)]
+    if not n:
+        return b''
+    S = min(S, n)                                  # never more segments than tokens
+    starts, lens = _segments(n, S)
+    pred = _LockPredictor(S)
+    banks = [MatchBank(ORDERS) if ORDERS else None for _ in range(S)]
+    mixers = [Mixer(1 + len(ORDERS)) if ORDERS else None for _ in range(S)]
+    apms = [APM(8 * VBITS) if ORDERS and APM_ON else None for _ in range(S)]
+    cdf = np.zeros((1 << VBITS) + 1, dtype=np.int64)
+    prev = [tok.eos_token_id] * S
+    chatty = n > 10000
+    for t in range(max(lens)):
+        probs = pred.feed(prev)
+        for s in range(S):
+            if t >= lens[s]:
+                continue                           # done: prev[s] stays, as filler
+            _build_cdf(cdf, probs[s], vocab)
+            tid = _code_token(coders[s], cdf, banks[s], mixers[s], apms[s],
+                              None if decode else ids[starts[s] + t])
+            if decode:
+                ids[starts[s] + t] = tid
+            if banks[s] is not None:
+                banks[s].push(tid)
+            prev[s] = tid
+        if chatty and t and not t % 2000:
+            done = sum(min(t, L) for L in lens)
+            print(f'  ... {done:,}/{n:,} tokens (S={S})', file=sys.stderr, flush=True)
+    if decode:
+        return tok.decode(ids, clean_up_tokenization_spaces=False).encode('utf-8')
+    blobs = [c.finish() for c in coders]
+    return ((LOCKSTEP_FLAG | n).to_bytes(4, 'big') + bytes([S])
+            + b''.join(len(b).to_bytes(4, 'big') for b in blobs) + b''.join(blobs))
+
+
+def compress_lockstep(data, S=4):
+    """S segments coded in lockstep. Unlike compress_batched, this DOES decode.
+
+    Costs ratio, because each segment starts from zero context: measured +8.9% at
+    560-token segments and +2.6% at 2,221, i.e. the penalty is a function of
+    segment LENGTH, not of S. On a large file S is close to free.
+    """
+    return _lockstep(data, S=max(1, S))
+
+
+def decompress_lockstep(blob):
+    return _lockstep(blob, decode=True)
+
+
 def decompress(blob):
     if not blob:
         return b''
     tok, _ = _load()
     n = int.from_bytes(blob[:4], 'big')
+    if n & LOCKSTEP_FLAG:
+        return decompress_lockstep(blob)
     if n & BATCHED_FLAG:
         raise ValueError(
             'this stream came from compress_batched, which is a ratio measurement '
@@ -508,9 +635,14 @@ if __name__ == '__main__':
     # headline run can skip it and cost half as much.
     encode_only = 'enc' in sys.argv[3:]
     batched = 'batch' in sys.argv[3:]
+    # lockstep: S segments in one [S,1] forward per step. Decodes, unlike batch.
+    lock = next((int(a[4:] or 4) for a in sys.argv[3:] if a.startswith('lock')), 0)
 
     t = time.perf_counter()
-    packed = (compress_batched if batched else compress)(data)
+    if lock:
+        packed = compress_lockstep(data, lock)
+    else:
+        packed = (compress_batched if batched else compress)(data)
     tc = time.perf_counter() - t
     td = None
     if batched and not encode_only:

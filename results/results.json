@@ -212,7 +212,7 @@
     }
   },
   "headline_alice29": {
-    "_about": "Full alice29.txt, 152089 bytes. VERIFIED round-trip as of 2026-08-03: sequential encode+decode of the whole file at the shipped defaults, which now means LIMIT=8192. Supersedes the 0.940 measured at LIMIT=1024, kept below under superseded_2026_07_31. The 32/34 B/s pair is the first throughput this project has measured on an idle box over a full file - every earlier figure was either contended or inflated by a sample barely larger than LIMIT.",
+    "_about": "Full alice29.txt, 152089 bytes. VERIFIED round-trip as of 2026-08-03: sequential encode+decode of the whole file at the shipped defaults, which now means LIMIT=8192. Supersedes the 0.940 measured at LIMIT=1024, kept below under superseded_2026_07_31. The 32/34 B/s pair is the first throughput this project has measured on an idle box over a full file - every earlier figure was either contended or inflated by a sample barely larger than LIMIT. Added 2026-08-31: the SmolLM2-360M row, measured 2026-08-23 and labelled 'measured, not decoded' - it beats the headline by 13% and does not replace it, because a batched stream has never round-tripped through the sequential decoder.",
     "bytes": 152089,
     "results": {
       "llm_ptc + SmolLM2-135M": {
@@ -261,6 +261,14 @@
       "ptc": {
         "bpb": 2.606,
         "size": 49543
+      },
+      "llm_ptc + SmolLM2-360M (measured, not decoded)": {
+        "bpb": 0.798,
+        "size": 15179,
+        "bytes_per_s": 409,
+        "path": "batched",
+        "round_trip": "NOT VERIFIED. Batched encode, 2026-08-23, whole file. Sits exactly where the 0.939 batched 135M figure sat before the sequential run: a faithful entropy measurement, not a decodable stream. It is charted because it is real and it is labelled because it is not the headline.",
+        "source": "RANK_1_REPORT.md, reconciled into this file 2026-08-31"
       }
     }
   },
@@ -510,11 +518,6 @@
       "detail": "0.811 there vs 0.917 mid-file. The XML preamble inflated it by 13%."
     },
     {
-      "claim": "the Docker layer opportunity needs a clever transform",
-      "outcome": "INVERTED - it needed no code at all",
-      "detail": "Re-encoding the identical tar with zstd -19 saves 32.3% and with xz -9 40.3%. The win was a codec default, not an algorithm."
-    },
-    {
       "claim": "rewriting ptc.py's hot loops (unrolled contexts, __slots__, inlined helpers, locals) is worth 1.35x encode / 1.41x decode",
       "outcome": "DOES NOT REPLICATE",
       "detail": "A 2026-07-31 audit measured 1.35x/1.41x and shipped a working rewrite. Re-measured on an idle machine with interleaved A/B (old,new,old,new - so drift and cache state hit both equally) and fastest-of-N: 1.00x encode, 1.07x decode. A coder-only variant (Model untouched) measured 1.03x/1.19x in a monkeypatch A/B and 1.07x decode interleaved. Both rewrites produce BYTE-IDENTICAL output on alice29/kennedy.xls/ptt5/chinook.db and cross-decode, so the correctness claim held and only the speed claim did not. Reverted: a 7% decode gain does not justify unrolling NCTX/NINP in the file the repo presents as its readable reference implementation, and ptc's constraint is ratio, not speed. The measurement lesson is the point - a speedup measured by running A then B is measuring cache state as much as code."
@@ -523,6 +526,37 @@
       "claim": "the shipped defaults are the measured optimum (README) - in particular the thread count",
       "outcome": "REFUTED",
       "detail": "os.cpu_count() was never swept. It is the slowest of five settings tested for the sequential codec: 42 B/s at 20 threads vs 87 at 6, a 2.07x penalty paid on every encode and every decode since the project started - including the ~3-hour full-file verification. The batched path wants the opposite (20 threads, 967 B/s vs 828 at 6), so one global default could not have been right for both."
+    },
+    {
+      "prediction": "the lockstep window-slide path works at S>1, since it is the same code the sequential path runs and the sequential path has slid for the project's whole life",
+      "outcome": "REFUTED - it had never executed at S>1, and would have run out of memory when it did",
+      "detail": "Found 2026-08-31 by reading, not by running. _LockPredictor.feed rebuilds the cache with an [S, WINDOW] forward when segments pass LIMIT, and transformers materialises logits for EVERY position unless logits_to_keep is set (default 0 -> slice(0, None), confirmed in the 5.14.1 source). That is S x 4096 x 49152 x 4 bytes: 0.8 GiB at S=1, 3.0 at S=4, 12.0 at S=16, on a 15.7 GB box with ~2.4 GB typically free. Every lockstep measurement so far was 8 KB or 32 KB, where a segment at S>1 is 140-2,221 tokens and never reaches LIMIT - so the branch had only ever run at S=1, where it is the same shape as the sequential path. The first run big enough to matter is exactly the full-enwik8 verification the roadmap calls 'about a weekend'.",
+      "fix": "logits_to_keep=1 on both slide forwards: 12.0 GiB -> 3.0 MiB at S=16. Verified at LIMIT=128 on 4,096 B, which slides 16 times per segment - round-trip ok sequential, S=1 and S=4.",
+      "lesson": "A code path that has never executed is not tested by the tests that pass around it. All the lockstep round-trips were green and none of them had entered this branch."
+    },
+    {
+      "prediction": "the logits_to_keep fix will change the format, since a different lm_head GEMM shape reduces floats in a different order - the same mechanism that made compress_batched undecodable",
+      "outcome": "HALF-REFUTED - the streams matched, the numbers underneath did not",
+      "detail": "Predicted the fix would change the format, since a different lm_head GEMM shape reduces floats in a different order. The streams measured BYTE-IDENTICAL at S=1 and S=4. But the underlying logits are not: max |dlogit| ~4e-5 and ~7% of 30-bit probability buckets move. So the prediction was right about the mechanism and the byte-identity is one sample agreeing, not compatibility. Treat it as a format change.",
+      "how_to_treat_it": "As a format change. Encoder and decoder must be on the same side of it. The byte-identity was measured on one 4,096 B sample at LIMIT=128; the divergence that broke compress_batched also did not show up until byte 253."
+    },
+    {
+      "prediction": "bigger models lose - Qwen3-0.6B scored 1.110 against SmolLM2-135M's 0.990",
+      "outcome": "REFUTED - three handicaps stacked on one row",
+      "detail": "The losing row was the INSTRUCT checkpoint, run at LIMIT=1024 against a 32,768-token native context, on a benchmark the winner had memorised. Re-run at matched sample and context, SmolLM2 135M -> 360M is -13% at every context on every corpus. Bigger wins.",
+      "where": "model_comparison_2026_08_03"
+    },
+    {
+      "prediction": "Qwen3-0.6B-Base generalises better to unseen text - it beat SmolLM2-360M by 12.2% on unseen arXiv prose",
+      "outcome": "REFUTED BY A GENRE CONTROL",
+      "detail": "Adding a second unseen corpus that was narrative rather than technical turned the 12.2% win into a 0.7% loss. The advantage is affinity for technical prose, not generalisation, and one unseen corpus in one genre could not tell those apart. That control cost an hour and would otherwise have pointed a 10-hour headline run at the wrong model.",
+      "where": "model_comparison_2026_08_03"
+    },
+    {
+      "prediction": "unseen text costs ~38%, and that gap is memorisation",
+      "outcome": "REFUTED - the confound was genre",
+      "detail": "Holding genre constant with a 2026 news corpus, the cost of never having seen the text is -0.8% to +5.7% across three models. The 25-30% cliff sits entirely on the narrative->technical axis. Normalised against xz, all three models score BETTER on the unseen file than the memorised one. Genre is only roughly controlled - Victorian fiction vs 2026 journalism is two narrative genres - and post-cutoff fiction under a redistributable licence is the honest gap.",
+      "where": "contamination_test, model_comparison_2026_08_03"
     }
   ],
   "why_not_just_a_faster_zip": {
@@ -684,6 +718,104 @@
       "two_costs_are_conflated_here": "At both sample sizes the segments (560 and 2,221 tokens) are SHORTER than LIMIT=8192, so a segment never fills its context window. The measured penalty therefore mixes two effects: one cold start per segment, and less available context per segment. On a file large enough that each segment exceeds LIMIT, only the first applies. That predicts the penalty keeps shrinking - but it is a PREDICTION, and trap 3 exists because this project keeps promoting those to findings.",
       "not_extrapolated": "Two points are a direction, not a curve. enwik8 at S=16 would give ~1.7M token segments, ~766x longer than the 32 KB test. Do not compute what the penalty would be there - measure it."
     },
-    "what_this_unblocks": "Long_Time_Tests 3.1, a verified full-enwik8 round-trip, was costed at 17 days and declared infeasible, blocked behind multi-week int8 determinism work. At S=16 decode measured 10.59x. That is roughly a weekend, and it needs no int8 at all - the largest single blocker on the roadmap, removed by ~130 lines."
+    "what_this_unblocks": "Long_Time_Tests 3.1, a verified full-enwik8 round-trip, was costed at 17 days and declared infeasible, blocked behind multi-week int8 determinism work. At S=16 decode measured 10.59x. That is roughly a weekend, and it needs no int8 at all - the largest single blocker on the roadmap, removed by ~130 lines.",
+    "speed_32768B": {
+      "_about": "Measured 2026-08-23, recorded here 2026-08-31 - previously only in RANK_3_REPORT.md. alice29, LIMIT=8192, round-trip ok at every S. bpb is deterministic and matches the S=1/S=4 rows already recorded under size_dependence; the B/s figures are from a different sitting and are not comparable with the 8,192 B table.",
+      "rows": [
+        {
+          "S": 1,
+          "segment_tokens": 8885,
+          "bpb": 0.953,
+          "size": 3904,
+          "decode_B_per_s": 47,
+          "speedup": 1.0,
+          "ratio_cost": "0%"
+        },
+        {
+          "S": 4,
+          "segment_tokens": 2221,
+          "bpb": 0.991,
+          "size": 4059,
+          "decode_B_per_s": 227,
+          "speedup": 4.83,
+          "ratio_cost": "+3.97%"
+        },
+        {
+          "S": 8,
+          "segment_tokens": 1110,
+          "bpb": 1.026,
+          "size": 4201,
+          "decode_B_per_s": 440,
+          "speedup": 9.36,
+          "ratio_cost": "+7.61%"
+        },
+        {
+          "S": 16,
+          "segment_tokens": 555,
+          "bpb": 1.082,
+          "size": 4432,
+          "decode_B_per_s": 663,
+          "speedup": 14.11,
+          "ratio_cost": "+13.52%"
+        }
+      ],
+      "penalty_decay": "Same S, 4x the segment length: S=4 9.08% -> 3.97% (2.29x), S=8 19.25% -> 7.61% (2.53x), S=16 37.41% -> 13.52% (2.77x). Three S values now agree that the cost tracks segment length, which is a curve rather than the single direction size_dependence had."
+    }
+  },
+  "model_comparison_2026_08_23": {
+    "_about": "Measured 2026-08-23, recorded here 2026-08-31 - the run existed only in RANK_1_REPORT.md, which commit 143b5fd untracked. Batched encode, LIMIT=8192, whole files. The batched path does not decode sequentially, so these are entropy measurements of the same quality as the old 0.939 figure was, NOT verified round-trips. The classical columns were re-verified 2026-08-31 by bench.py: book1 xz -9 261,116 B and bz2 -9 232,598 B, both exact.",
+    "alice29_360M": {
+      "file": "corpus/alice29.txt",
+      "bytes": 152089,
+      "tokens": 41933,
+      "model": "HuggingFaceTB/SmolLM2-360M",
+      "weights_on_disk_MB": 727,
+      "bpb": 0.798,
+      "size": 15179,
+      "bytes_per_s": 409,
+      "path": "batched",
+      "vs_135M_verified": "-12.8% against the 0.915 full-file sequential figure. That comparison crosses paths - batched vs sequential - which the repo's own rule forbids. The batched/sequential gap measured 0.15% on this file at LIMIT=1024, so the model effect dwarfs it, but the honest like-for-like baseline (135M batched, LIMIT=8192, full file) has never been run.",
+      "status": "This is now a MEASUREMENT, not the extrapolation NEXT_STEPS 2b warned about. It is still not a verified round-trip, so it does not replace the 0.915 headline."
+    },
+    "book1_135M": {
+      "file": "corpus/book1",
+      "bytes": 768771,
+      "tokens": 205456,
+      "model": "HuggingFaceTB/SmolLM2-135M",
+      "bpb": 1.27,
+      "size": 122034,
+      "bytes_per_s": 577,
+      "path": "batched",
+      "vs_ts_zip_published": "ts_zip 1.431 bpb on the identical file - 11.3% smaller",
+      "vs_xz9": "xz -9 261,116 B / 2.717 bpb - 2.14x smaller",
+      "why_it_matters": "A second directly-comparable ts_zip data point. Closes Long_Time_Tests item 1.5."
+    }
+  },
+  "enwik8_scaling_2026_08_23": {
+    "_about": "Measured 2026-08-23, recorded here 2026-08-31 - previously only in RANK_2_REPORT.md. Batched encode, SmolLM2-135M, LIMIT=8192. Closes Long_Time_Tests item 1.2, the trend check that was supposed to de-risk the 26-hour full-enwik8 run.",
+    "rows": [
+      {
+        "slice": "enwik8_mid",
+        "bytes": 262144,
+        "bpb": 0.917,
+        "size": 30064
+      },
+      {
+        "slice": "enwik8_1m",
+        "bytes": 1048576,
+        "tokens": 320921,
+        "bpb": 0.888,
+        "size": 116421,
+        "bytes_per_s": 486
+      }
+    ],
+    "trend": "4x the data improved bpb by 3.2%. The direction the full-file run needed.",
+    "classical_on_enwik8_1m": {
+      "xz -9": 319520,
+      "bz2 -9": 313306,
+      "_verified": "both re-measured 2026-08-31, exact match"
+    },
+    "vs_ts_zip_published": "ts_zip 1.106 bpb on full enwik8. 0.888 on 1 MB is 19.7% under it.",
+    "do_not_extrapolate": "1 MB is 1% of enwik8 and two points are a direction, not a curve. Trap 3 exists because this project keeps promoting those to findings."
   }
 }

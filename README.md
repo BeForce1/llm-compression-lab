@@ -19,7 +19,7 @@ lives in **[sql-compression](https://github.com/BeForce1/sql-compression)**.
 
 Everything below was measured by this code on a laptop CPU with no GPU. Figures quoted
 from other people's work are labelled as such. **The negative results are the most useful
-part of this repo** — nine predictions were refuted by measurement, and they are all in
+part of this repo** — fourteen predictions were refuted by measurement, and they are all in
 [§ What didn't work](#what-didnt-work).
 
 ---
@@ -32,6 +32,7 @@ On `alice29.txt` (152,089 bytes) — every codec on the identical file:
 
 | codec | size | bits/byte | vs ours |
 |---|---:|---:|---:|
+| llm_ptc + SmolLM2-360M *— measured, not decoded* | 15,179 | 0.798 | −13% |
 | **llm_ptc + SmolLM2-135M** | **17,400** | **0.915** | — |
 | ts_zip (RWKV-169M) *— published* | ~21,711 | 1.142 | +25% |
 | llm_ptc + GPT-2 124M | 34,868 | 1.834 | +100% |
@@ -43,6 +44,14 @@ On `alice29.txt` (152,089 bytes) — every codec on the identical file:
 **2.79× smaller than `xz -9`**, and 19.9% smaller than the published ts_zip figure on the
 same file — using a 272 MB model on CPU. That row is a **verified round-trip on the whole
 file**, not an entropy measurement; what it cost to get there is the next section.
+
+The 360M row above it is bolder and softer at once: **0.798 bpb / 15,179 B, 10.0× versus
+raw and 3.19× versus `xz -9`**, measured 2026-08-23 on the whole file at 409 B/s. It is a
+*batched* measurement, so it sits exactly where 0.939 used to — real, and not decodable.
+It is not the headline until it round-trips. Note also that it compares a batched run to a
+sequential one, which this repo's own rule forbids; the batched/sequential gap on this file
+measured 0.15%, so the model effect dwarfs it, but the like-for-like baseline (135M,
+batched, `LIMIT=8192`, full file) has never actually been run.
 
 ### What is *measured* versus what is *decodable*
 
@@ -358,8 +367,15 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | SSE/APM will help, as it does in every serious CM compressor | **refuted** | Neutral at 25% weight, harmful at 75%. Nothing to recalibrate. |
 | batched teacher-forced encoding is a free 16× speedup | **partial** | 16× faster, byte-identical output — but the stream does **not** decode with the sequential decoder. Diverged at byte 253. |
 | the first 256 KB of enwik8 is a representative sample | **refuted** | 0.811 there vs 0.917 mid-file. XML preamble, 13% bias. |
-| grouping SQLite pages by b-tree kind will help — the kinds have very different byte character | **refuted** | 0.5–4.1%. Real databases are overwhelmingly one kind (2,830 of 2,913 leaf-table), and fresh ones have no free pages to gather. |
-| the Docker layer opportunity needs a clever transform | **inverted — it needed no code** | Re-encoding the identical tar with `zstd -19` saves 32.3%. The win was a codec default. |
+| the lockstep window-slide works at S>1 — it's the same code the sequential path has run all along | **refuted, by reading rather than running** | It had never *executed* at S>1. Every lockstep test was 8–32 KB, where a segment never reaches `LIMIT`. The first run big enough to slide would have asked for **12.0 GiB** of logits at S=16. Fixed with `logits_to_keep=1`; 12.0 GiB → 3.0 MiB. |
+| that fix will change the format, since a different `lm_head` GEMM reduces floats in a different order | **half-refuted** | Streams measured **byte-identical** at S=1 and S=4 — but the logits underneath differ by ~4e-5 and ~7% of probability buckets move. One sample agreeing is not compatibility. Treat it as a format change. |
+| rewriting `ptc.py`'s hot loops (unrolled contexts, `__slots__`, inlined helpers) is worth 1.35× | **refuted by interleaving** | 1.35× run A-then-B, **1.00×** run A,B,A,B on an idle box. The first measurement was cache state. Reverted. |
+| the shipped defaults are the measured optimum, as the README said | **refuted** | `LLM_PTC_THREADS` was `os.cpu_count()` and had never been swept. It was the *slowest* of five settings — 42 B/s vs 87 at 6 threads, **2.07×** paid on every run in the project's life. |
+
+
+Three more — SQLite page grouping, the Docker layer, and the `wiki.sql` parser — moved with
+their code to [sql-compression](https://github.com/BeForce1/sql-compression) and are listed
+there rather than duplicated here.
 
 Two instrument bugs were also caught by sanity checks rather than by luck: a
 cost-bucketing bug in `probe.py` that put the *start of the file* in the "post-slide"
@@ -405,8 +421,14 @@ legal route is a model that **trains itself online during decompression**, which
 exactly why NNCP and cmix are built the way they are.
 
 The legitimate target instead is **ts_zip's published enwik8 figure of 1.106 bpb** —
-same file, and both sides ship a pretrained model. Current standing on a representative
-262 KB slice is **0.917**, with the full-file run still outstanding.
+same file, and both sides ship a pretrained model. Current standing is **0.888 on a 1 MB
+slice** (measured 2026-08-23, up from 0.917 on 262 KB — 4× the data bought 3.2%), which is
+19.7% under ts_zip. The full-file run is still outstanding, and 1 MB is 1% of enwik8: two
+points are a direction, not a curve.
+
+There is now a second directly-comparable point that needs no extrapolation at all.
+On **`book1`**, where ts_zip publishes 1.431 bpb on the identical file, this measures
+**1.270** — 11.3% smaller, and 2.14× smaller than `xz -9`'s 261,116 B.
 
 ---
 
@@ -475,9 +497,13 @@ clock, and the order to do them in. The short version:
   bpb**, `round-trip: ok` both times. The first estimate said 75 min and took ~3 hours; the
   second said 2.5–3 h and took ~5.5. See trap 3 in `handoff.md`, and note it has now caught
   the same person twice.
+- ~~**~1 hour** checks the enwik8 trend before committing to the long run~~ — **done
+  2026-08-23**: 0.917 at 262 KB → **0.888 at 1 MB**. The trend goes the right way.
 - **~26 hours** turns the ts_zip enwik8 comparison from an extrapolation into a measurement.
-- **~17 days** would be a verified full-enwik8 round-trip, which is why deterministic
-  integer inference is the one engineering task that matters more than any run.
+- ~~**~17 days** for a verified full-enwik8 round-trip~~ — lockstep decode cut that to about
+  a weekend, and it needs no int8. But the slide path it depends on had never executed at
+  S>1 and would have asked for 12 GiB of logits; that is fixed, and the fix is verified only
+  at `LIMIT=128` on 4 KB so far.
 
 ## Files
 

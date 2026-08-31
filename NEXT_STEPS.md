@@ -26,8 +26,8 @@ Three caveats that are load-bearing, not throat-clearing:
 
 The honest summary is the one `handoff.md` already gives: **a well-measured reproduction,
 not a contribution.** What is genuinely worth keeping is the method and the negative
-results — ten refuted predictions with measurements, and instrument bugs caught by sanity
-checks rather than luck.
+results — fourteen refuted predictions with measurements, and instrument bugs caught by
+sanity checks rather than luck.
 
 ---
 
@@ -37,7 +37,7 @@ checks rather than luck.
 |---|---|---|
 | encode **and** decode throughput | baseline | **2.07× faster** |
 | known silent-corruption / crash bugs | 9 | 0 |
-| refuted predictions on record | 9 | 10 (+3 moved to sql-compression) |
+| refuted predictions on record | 9 | 10 (+3 moved to sql-compression; 14 as of 2026-08-31) |
 | charts with hardcoded numbers | 3 | 0 |
 
 **The single biggest win was one line.** `LLM_PTC_THREADS` defaulted to `os.cpu_count()`,
@@ -68,6 +68,18 @@ codec speeds understated by 5–33×, all in the direction that flattered this r
 ---
 
 ## What to do next
+
+### 0. Sweep the thread count for lockstep — **~30 min** ⭐ do this before the long run
+
+`compress_batched` explicitly overrides to all cores, with a measured comment saying why.
+`compress_lockstep` does not: it inherits `_load()`'s `min(6, cpu_count)`, which was swept
+for the **sequential** path. A `[S,1]` GEMM is neither shape — at S=16 it is sixteen times
+wider than the one the 6-thread optimum was measured on, and nobody has measured it.
+
+Trap 9 is exactly this: *a default is not a measurement*. The last time it was checked, an
+inherited default was worth 2.07× on every run the project had ever made, and it is now
+inherited on the path the whole roadmap depends on. Interleave the runs (trap 10) and take
+fastest-of-N.
 
 ### ~~1. Sweep the context length~~ — **DONE 2026-08-03.** Worth −11.3%
 
@@ -134,15 +146,22 @@ the wide-vocab models or use the sequential path, and *say which* in the results
 
 </details>
 
-### 2b. The headline is now pointed at the wrong model — **7–10 h**
+### 2b. The headline is pointed at the wrong model — **the extrapolation has been run**
 
-`SmolLM2-360M` beats the headline model by **13%** on `alice29` at every context tested
-(0.812 vs 0.934 at 8192, on 65,536 B). A naive scaling of the verified 0.915 full-file
-figure lands near **0.80 bpb**, which would be ~10× versus raw and ~3.2× versus `xz -9`.
+Predicted "near 0.80 bpb, and must not be quoted until it is run". It was run on
+2026-08-23 and landed at **0.798 bpb / 15,179 B** on the whole file — 10.0× versus raw,
+3.19× versus `xz -9`, at 409 B/s. Prediction inside its own band, which is the rare case.
 
-**That number is an extrapolation and must not be quoted until it is run** — trap 3 is
-about precisely this, and it has already caught this project twice today. What it needs is
-a full-file sequential encode *and* decode at the new model, same as the 0.915 run.
+**It is still not the headline, and the reason is the same one that demoted 0.939.** That
+run used the *batched* path, so it is an entropy measurement, not a decodable stream. What
+would make it the headline is a full-file sequential encode **and** decode, same as the
+0.915 run — call it 7–10 h at 360M's slower rate, or a weekend at S=16 lockstep now that
+the slide path works.
+
+One caveat the run itself carries: 0.798 batched against 0.915 sequential crosses paths,
+which this repo's own rule forbids. The gap measured 0.15% on this file, so −13% is
+overwhelmingly the model — but the honest like-for-like baseline (135M, batched,
+`LIMIT=8192`, whole file) has never been run, and it is 20 minutes of compute.
 
 Price it honestly first: 360M is 2.7× the parameters, so it is slower than the 32 B/s that
 already put break-even at 481 days, and the model on disk grows from 272 MB to ~720 MB.
@@ -201,9 +220,30 @@ supposedly blocked behind.
 
 ### 3b. Now actually run the full-enwik8 verification — **~a weekend**
 
-Unblocked by the item above and by nothing else. Run it at S=16 with segments long enough
-that the ratio cost is the cold-start term only, and **measure** the penalty there rather
-than inheriting either the 3.97% or the pilot's discredited 2.6%.
+Unblocked by the item above and by one thing that turned out not to be true. Run it at
+S=16 with segments long enough that the ratio cost is the cold-start term only, and
+**measure** the penalty there rather than inheriting either the 3.97% or the pilot's
+discredited 2.6%.
+
+**The blocker found 2026-08-31, by reading rather than running.** `_LockPredictor.feed`
+rebuilds the cache with an `[S, WINDOW]` forward when segments pass `LIMIT`, and
+`transformers` materialises logits for every position unless `logits_to_keep` is set.
+That is `S × 4096 × 49,152 × 4` bytes — 0.8 GiB at S=1, 3.0 at S=4, **12.0 GiB at S=16**,
+on a box with ~2.4 GB free. Every lockstep test so far was 8 KB or 32 KB, where a segment
+at S>1 is 140–2,221 tokens and never reaches `LIMIT`, so the branch had **only ever run at
+S=1**. The first run large enough to slide is exactly this one.
+
+Fixed with `logits_to_keep=1` on both slide forwards: 12.0 GiB → 3.0 MiB. Verified at
+`LIMIT=128` on 4,096 B, which slides sixteen times per segment — round-trip ok sequential,
+S=1 and S=4. **Treat it as a format change**: the streams measured byte-identical, but the
+logits underneath differ by ~4e-5 and ~7% of probability buckets move, which is the same
+mechanism that made `compress_batched` undecodable. Encoder and decoder must match.
+
+**Do the 1 MB rehearsal first — ~1 hour.** `enwik8_1m` at S=16 gives 20,057-token segments,
+comfortably past `LIMIT=8192`, so it is the first run where segments exceed the context
+window. It is the only test that turns "the penalty approaches zero on big files" from a
+prediction into a measurement, and it exercises the fixed slide path at scale before a
+weekend is committed to it.
 
 ### Do not start with int8
 

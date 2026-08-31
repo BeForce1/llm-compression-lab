@@ -145,8 +145,18 @@ class Predictor:
         """
         self.ids.append(tid)
         if len(self.ids) > LIMIT:
+            # logits_to_keep=1 slices hidden_states before lm_head, so the slide
+            # allocates one position of logits instead of WINDOW. That is 0.8 GiB
+            # -> 0.2 MiB here, and it is what makes the lockstep slide possible at
+            # all: S x WINDOW x 49,152 x 4 B is 12.0 GiB at S=16 on a 15.7 GB box.
+            # NOT backward compatible, and do not assume it is: the last-row logits
+            # differ by ~4e-5 between the two shapes and ~7% of 30-bit probability
+            # buckets move, which is the same reduction-order effect that made
+            # compress_batched undecodable. It measured byte-identical on 4,096 B
+            # at LIMIT=128 - that is one sample agreeing, not a guarantee.
             self.ids = self.ids[-WINDOW:]
-            out = self.model(input_ids=torch.tensor([self.ids]), use_cache=True)
+            out = self.model(input_ids=torch.tensor([self.ids]), use_cache=True,
+                             logits_to_keep=1)
         else:
             out = self.model(input_ids=torch.tensor([[tid]]),
                              past_key_values=self.past, use_cache=True)
@@ -496,8 +506,15 @@ class _LockPredictor:
         for s, t in enumerate(toks):
             self.ids[s].append(t)
         if len(self.ids[0]) > LIMIT:
+            # See Predictor.feed: without logits_to_keep this materialises
+            # [S, WINDOW, vocab] float32 - 12.0 GiB at S=16, on a box with ~2.4 GB
+            # free. Every lockstep run so far was 8-32 KB, where a segment at S>1
+            # is 140-2,221 tokens and never reaches LIMIT, so this branch had only
+            # ever executed at S=1. Verified 2026-08-31 at LIMIT=128 on 4,096 B,
+            # which slides 16 times per segment: round-trip ok at S=1 and S=4.
             self.ids = [x[-WINDOW:] for x in self.ids]
-            out = self.model(input_ids=torch.tensor(self.ids), use_cache=True)
+            out = self.model(input_ids=torch.tensor(self.ids), use_cache=True,
+                             logits_to_keep=1)
         else:
             out = self.model(input_ids=torch.tensor([[t] for t in toks]),
                              past_key_values=self.past, use_cache=True)
@@ -582,9 +599,15 @@ def _lockstep(data_or_blob, S=None, decode=False):
 def compress_lockstep(data, S=4):
     """S segments coded in lockstep. Unlike compress_batched, this DOES decode.
 
-    Costs ratio, because each segment starts from zero context: measured +8.9% at
-    560-token segments and +2.6% at 2,221, i.e. the penalty is a function of
-    segment LENGTH, not of S. On a large file S is close to free.
+    Costs ratio, because each segment starts from zero context. The cost is a
+    function of segment LENGTH, not of S: on alice29 at LIMIT=8192, S=4 measured
+    +9.08% at 560-token segments and +3.97% at 2,221. Quote 3.97% - the scratch
+    pilot claimed 2.6% for that step and it did NOT replicate.
+
+    Both figures are still measured where a segment is SHORTER than LIMIT, so they
+    mix one cold start per segment with reduced context per segment. On a file
+    where segments exceed LIMIT only the cold start applies, which predicts a
+    smaller penalty - a prediction, not a measurement, and nobody has run it.
     """
     return _lockstep(data, S=max(1, S))
 

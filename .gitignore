@@ -16,12 +16,9 @@ venv/
 .vscode/
 .DS_Store
 
-# Markdown reports and documents
-RANK_*.md
-*_REPORT.md
-REPORT*.md
-*.md
-!README.md
-!NEXT_STEPS.md
-!handoff.md
-!Long_Time_Tests.md
+# No blanket *.md here, and that is deliberate. A whitelist ignored three real
+# benchmark reports for a week: RANK_1/2/3_REPORT.md held the only copy of the
+# SmolLM2-360M, book1 and enwik8_1m numbers, and none of them reached
+# results/results.json. Measurements belong in the JSON; if a report is scratch,
+# name it scratch_*.md and it will be ignored below.
+scratch_*.md

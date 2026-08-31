@@ -47,7 +47,7 @@ Two corrections to this entry's own estimates, worth keeping visible:
   settle it — unrelated benchmarking was running on the machine at the time. Anyone wanting
   that number needs a quiet box.
 
-### 1.2 Trend check before committing to enwik8 — **~1 hour**
+### ~~1.2 Trend check before committing to enwik8~~ — **DONE 2026-08-23**
 We have 0.917 bpb on a 262 KB slice and are extrapolating to a 100 MB claim across
 **380×** the data. Check the trend at 16× first.
 
@@ -62,8 +62,14 @@ open('corpus/enwik8_4m','wb').write(data)
 EOF
 python llm_ptc.py corpus/enwik8_4m 4194304 enc batch
 ```
-- **Buys:** de-risks the 26-hour run. Also the first real test of whether the match model's gain *grows* with file size — its hash table sees 1.2M tokens here vs 75K in the ablation, and that's the main reason to expect the full run to beat the extrapolation.
-- **Expect:** ≤ 0.917. If it doesn't improve, the full-enwik8 claim is weaker than assumed and Tier 2.1 should wait.
+**Result: 0.888 bpb on `enwik8_1m`** (1,048,576 B, 320,921 tokens, batched, 486 B/s) against
+0.917 on the 262 KB slice. Predicted "≤ 0.917"; landed 3.2% under it, so 2.1 is de-risked and
+the match model's gain does grow with the hash table. `xz -9` on the same slice is 319,520 B
+and `bz2 -9` 313,306 B, both re-verified 2026-08-31 — so this is 2.74× `xz` and 19.7% under
+ts_zip's published enwik8 figure.
+
+**1 MB is 1% of enwik8 and two points are a direction, not a curve.** Do not quote a
+full-file number off this.
 
 ### 1.3 Does base really beat instruct? — **~1 hour**
 The README states this as an untested hypothesis for why Qwen3-0.6B lost to a model 4.4×
@@ -76,24 +82,32 @@ LLM_PTC_MODEL=Qwen/Qwen3-0.6B-Base python llm_ptc.py corpus/enwik8_mid 262144 en
 - **Buys:** either confirms a genuinely useful rule (*use base models for compression*) or removes a claim from the README. Both are wins.
 - **Careful:** match samples exactly — use the same corpus and byte count for both, not the numbers already recorded against different samples.
 
-### 1.4 SmolLM2-360M — **~1.5 hours** on full alice29
+### ~~1.4 SmolLM2-360M~~ — **DONE 2026-08-23**
 The model is the dominant lever: swapping it was worth 45%, all hand-built modelling ~1%.
 
 ```bash
 LLM_PTC_MODEL=HuggingFaceTB/SmolLM2-360M python llm_ptc.py corpus/alice29.txt 152089 enc batch
 ```
-- **Buys:** the cheapest remaining ratio gain. 2.7× params, expect ~2.5× slower.
-- **Watch:** whether it beats 0.939 by more than it costs in speed. 135M already beat a 600M model, so bigger is *not* guaranteed better here.
-- **Compare against 0.939, not the 0.940 headline.** That command runs `batch`, so the batched 135M figure is the like-for-like baseline. Mixing the two paths manufactures a 0.001 bpb difference that is the encoder, not the model.
+**Result: 0.798 bpb / 15,179 B on full `alice29.txt`**, batched, 409 B/s — 10.0× versus raw
+and 3.19× versus `xz -9`. That is −13% against the 0.915 verified figure.
 
-### 1.5 book1 and the rest of the corpus — **~15 min** each
+Two things the run does not settle. It is **batched, so not decodable**, which is exactly
+where 0.939 sat before item 1.1 — it is a measurement, not a headline. And the −13% compares
+a batched run to a sequential one, which this file's own rule forbids: the like-for-like
+baseline (135M, batched, `LIMIT=8192`, whole file) has still never been run, and it is 20
+minutes.
+
+### ~~1.5 book1 and the rest of the corpus~~ — **DONE 2026-08-23**
 `llm_ptc` has only ever been measured on alice29, post2026 and enwik8 slices. `book1` has
 a published ts_zip figure (1.431) and a published `xz` figure (2.717) we already match.
 
 ```bash
 python llm_ptc.py corpus/book1 768771 enc batch
 ```
-- **Buys:** a second directly-comparable data point against ts_zip. Cheap. Do it while something else runs.
+**Result: 1.270 bpb / 122,034 B on full `book1`**, batched, 577 B/s — **11.3% under
+ts_zip's published 1.431** on the identical file, and 2.14× smaller than `xz -9`'s 261,116 B
+(which `bench.py` reproduces exactly). A second directly-comparable ts_zip point that needs
+no extrapolation at all.
 
 ---
 
@@ -106,10 +120,10 @@ The only way the ts_zip comparison stops being an extrapolation. 100,000,000 byt
 ```bash
 python llm_ptc.py corpus/enwik8 100000000 enc batch > enwik8_full.log 2>&1 &
 ```
-- **Buys:** a number that sits directly beside ts_zip's published **1.106 bpb** on the identical file. Current standing: 0.917 on a representative slice.
-- **Do 1.2 first.** Don't spend a day confirming a trend you can check in an hour.
+- **Buys:** a number that sits directly beside ts_zip's published **1.106 bpb** on the identical file. Current standing: **0.888 on a 1 MB slice**, 19.7% under it.
+- **1.2 is done** and the trend goes the right way (0.917 at 262 KB -> 0.888 at 1 MB).
 - **Progress:** prints running bpb to stderr every 2,000 tokens, so it's checkable mid-flight.
-- **Memory:** logits are `[window, vocab]` float32 — ~200 MB per batch for SmolLM2. Watch it if you switch to a large-vocab model (Qwen3's 151K vocab is ~620 MB per batch).
+- **Memory:** logits are `[window, vocab]` float32 — 1.6 GB per batch for SmolLM2 at `LIMIT=8192`, and 5.0 GB for Qwen3's 151,936 vocab. The batched path genuinely needs all those positions, so `logits_to_keep` does not help it; cap `LLM_PTC_LIMIT` for wide-vocab models instead.
 - **No resumption.** If it dies at hour 20 you start over. Writing a checkpoint (token index + coder state + match tables) is a prerequisite if this proves flaky.
 
 ### 2.2 A large genuinely-unseen corpus — **collection + ~2 hours**
@@ -124,9 +138,16 @@ for the load-bearing claim that our advantage isn't memorisation.
 
 ## Tier 3 — days, or blocked on engineering
 
-### 3.1 Full enwik8 verified round-trip — **~17 days** ❌ infeasible as built
-100 MB decoded at ~65 B/s, and decoding **cannot** be parallelised. Do not start this.
-Blocked on 4.1. Listed so nobody plans around it thinking it's just a long weekend.
+### 3.1 Full enwik8 verified round-trip — **~a weekend at S=16**, no longer blocked
+Was costed at ~17 days and declared infeasible because decoding cannot be parallelised
+*within* one stream. Item 4.6 shipped and made that false across streams: at S=16 the 32 KB
+matrix measured 14.11× decode. Not blocked on 4.1 any more.
+
+**Two things to do first.** Sweep the thread count for the lockstep path (it silently
+inherits the sequential optimum — see NEXT_STEPS item 0), and run `enwik8_1m` at S=16 as a
+one-hour rehearsal. That rehearsal is the first run where a segment exceeds `LIMIT`, so it
+is also the first real exercise of the slide path repaired on 2026-08-31 — which, until
+then, had never executed at S>1 and would have asked for 12.0 GiB of logits.
 
 ### 3.2 enwik9 — **~11 days encode**
 ts_zip publishes **1.084 bpb** on enwik9 and the Hutter record is **0.886**. 1 GB at
@@ -181,7 +202,22 @@ Went with the rest of the format-aware work to
 [sql-compression](https://github.com/BeForce1/sql-compression), rescoped and with the
 prerequisite churn fixture written up. Nothing here depends on it.
 
-### 4.6 Multi-stream lockstep decode ⭐ the cheap alternative to 4.1
+### ~~4.6 Multi-stream lockstep decode~~ — **SHIPPED 2026-08-03**, and repaired 2026-08-31
+
+In `llm_ptc.py` as `compress_lockstep` / `decompress_lockstep`. The 32 KB matrix: S=4 is
+4.83x decode for +3.97%, S=8 is 9.36x for +7.61%, S=16 is **14.11x for +13.52%**, all
+round-trip ok. The penalty falls with segment length at every S (2.29x, 2.53x, 2.77x for
+4x the length), which is the cold-start signature the design predicted.
+
+**The window-slide branch had never executed at S>1.** Found 2026-08-31 by reading:
+`_LockPredictor.feed` rebuilds with an `[S, WINDOW]` forward past `LIMIT`, and transformers
+materialises every position's logits unless `logits_to_keep` is set - 12.0 GiB at S=16 on a
+box with ~2.4 GB free. Every test was 8-32 KB, where segments never reach `LIMIT`. Fixed;
+verified at `LIMIT=128` on 4 KB at S=1 and S=4. Treat it as a format change: the streams
+matched byte-for-byte, the logits underneath move by ~4e-5.
+
+<details><summary>the original entry, for the record</summary>
+
 **PILOT BUILT AND RUN, 2026-07-31 — mechanism confirmed, cost not yet priced.**
 "Decoding cannot be batched" is true *within* one stream and false *across*
 streams. Split the token sequence into S segments, give each its own KV cache, match bank
@@ -236,7 +272,9 @@ big enough to give long segments.
   before quoting it.
 - **Also unresolved:** the pilot uses equal-length segments and drops the remainder. A real
   implementation needs per-segment lengths in the header and streams that retire at different
-  steps without changing the batch shape mid-run.
+  steps without changing the batch shape mid-run. *(Both shipped.)*
+
+</details>
 
 ### 4.5 2D contexts in `ptc` for images
 `ptc` loses to `xz` on `ptt5` (0.834 vs 0.655) because its contexts are 1-D while the

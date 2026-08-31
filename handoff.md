@@ -4,7 +4,7 @@ For whoever picks this up next, including future-me. Read this before running an
 
 **Repo:** `github.com/BeForce1/llm-compression-lab` (private)
 **Working copy:** `C:\Users\aregm\personal\llm-compression-lab`
-**Started:** 2026-07-30. **This doc:** 2026-07-31.
+**Started:** 2026-07-30. **This doc:** 2026-07-31, last reconciled 2026-08-31.
 
 ---
 
@@ -26,7 +26,7 @@ ts_zip shipped in 2023; our 17.7% margin over it is a *model-vintage artifact* (
 2024 model against their 2023 one), not an algorithmic advance. Nothing here is novel.
 
 **What is genuinely worth keeping** is the method and the negative results: a harness that
-reproduces published `xz` figures to three decimals, nine refuted predictions with
+reproduces published `xz` figures to three decimals, fourteen refuted predictions with
 measurements, and two instrument bugs caught by sanity checks rather than luck.
 
 **Effort-to-result is humbling and worth internalising before you plan work:** swapping the
@@ -44,10 +44,11 @@ already have.
 | `ptc.py` → 3.1× on text (2.606 bpb) | **verified** |
 | `llm_ptc` → 8.74× on alice29 (0.915 bpb) | **verified** — full-file sequential round-trip, 2026-08-03, at `LIMIT=8192` |
 | `llm_ptc` round-trip | **verified to 152,089 B**, one machine only — see below |
-| SQL dump transform → −28.6% chinook / −22.2% wiki_meta | **verified**, round-trip asserted every run, plus a `selfcheck()` over 12 dump shapes |
-| SQLite page grouping → −0.5% | verified, and a **dead end** |
-| OCI layer → −34.9% (`zstd -19 --long=27`) | **re-encode**, not byte-lossless. Identical tar, new digest. |
-| enwik8 → 0.917 bpb | 262 KB slice only. Full-file figures are **extrapolations**. |
+| `llm_ptc` + SmolLM2-**360M** → 0.798 bpb on full alice29 | **measured, not decoded** — batched path, 2026-08-23. Sits exactly where 0.939 used to. |
+| `llm_ptc` → 1.270 bpb on full `book1`, vs ts_zip's published 1.431 | **measured, not decoded** — batched, 2026-08-23 |
+| enwik8 → 0.888 bpb on 1 MB, 0.917 on 262 KB | **measured, not decoded**. Full-file figures are **extrapolations**. |
+| lockstep window-slide at S>1 | **repaired 2026-08-31**, verified only at `LIMIT=128` on 4 KB — see below |
+
 
 **`compress_batched` still has never been decoded, and the headline no longer depends on
 it.** It is 16× faster and produced byte-identical output on an 8 KB sample, but its stream
@@ -171,7 +172,14 @@ These all cost me real time. They are the most valuable part of this document.
    the **slowest** of five settings — 42 B/s vs 87 at 6 threads. Every encode and decode in
    this project's history, including the 3-hour full-file verification, paid 2.07× for it.
    Anything you inherited rather than measured is a candidate.
-10. **A speedup measured as "run A, then run B" is measuring cache state.** The audit's
+10. **A code path that has never executed is not tested by the green tests around it.**
+   Every lockstep round-trip passed, at S=1/2/4/8/16, and not one of them had entered the
+   window-slide branch at S>1 - 8 KB and 32 KB samples give segments of 140-2,221 tokens
+   against a `LIMIT` of 8,192. That branch would have asked for **12.0 GiB** of logits at
+   S=16, on a box with ~2.4 GB free, the first time a file was large enough to slide. It
+   was found by reading the code, not by running it. When a suite is green, ask which
+   branches it actually reached.
+11. **A speedup measured as "run A, then run B" is measuring cache state.** The audit's
    1.35×/1.41× `ptc` rewrite measured **1.00×/1.07×** when re-run interleaved (A,B,A,B) on an
    idle box, and was reverted. Interleave, take fastest-of-N, and run nothing else.
 
@@ -243,24 +251,27 @@ All in `results/results.json` with numbers; the short version:
 
 ## What to do next
 
-`Long_Time_Tests.md` has everything costed and ordered. With D.4 closed, the three that matter:
+`Long_Time_Tests.md` has everything costed and ordered. In order:
 
-1. **Multi-stream lockstep decode** (item 4.6) — new, and now the best-value item on the
-   list. A scratch pilot already round-trips byte-exactly at S=4/8/16 with **2.5–8.8× decode**,
-   and the ratio cost falls with segment length (8.9% at 560-token segments, 2.6% at 2,221),
-   so it is close to free on large files. This is what makes a full-enwik8 *verified*
-   round-trip feasible without solving int8 determinism first.
-2. **Record-level SQLite columnarisation** (item 4.4) — rescoped: OLTP-shaped dbs only
-   (~10% ceiling; wiki.db's is ~0.1%), and build the churn fixture first, because all three
-   sample dbs have zero freeblocks/overflow/stale bytes and cannot catch a rebuild bug.
-   `encode_col` is reusable as-is, and rowid ramps are exactly what delta is for.
-3. **Deterministic int8 inference** (item 4.1) — the sole path from "measurement demo" to
-   "working codec". Collapses a 17-day verified round-trip to ~2 hours and makes
-   cross-machine decompression possible.
+1. **Sweep `LLM_PTC_THREADS` for the lockstep path** — 30 minutes, and trap 9 verbatim.
+   `compress_batched` overrides to all cores with a measured comment saying why;
+   `compress_lockstep` silently inherits the *sequential* optimum of 6. A `[16,1]` GEMM is
+   neither shape. The last inherited default cost 2.07× on every run this project made.
+2. **`enwik8_1m` at S=16** — about an hour, and the only test that turns "the lockstep
+   penalty approaches zero on big files" from a prediction into a measurement. 20,057-token
+   segments, so it is also the first run where a segment exceeds `LIMIT` and the repaired
+   slide path runs at scale. Do it before committing a weekend.
+3. **Full-`enwik8` verified round-trip at S=16** — about a weekend, unblocked, and no
+   longer waiting on int8.
+4. **Deterministic int8 inference** (item 4.1) — still the only path from "measurement demo"
+   to "working codec" and cross-machine decompression, but no longer the blocker for any
+   run on this list.
+
 
 **Explicitly not worth doing:** a C port of `ptc` (its ratio already loses to `bz2`, so
 speed isn't the constraint), SSE/APM (tested, harmful), more match orders (0.2% for 25%
-speed), and chasing full-`enwik8` before the 1-hour trend check in item 1.2.
+speed), and chasing full-`enwik8` before item 2 above. The 262 KB -> 1 MB trend check
+that used to be the gate is done: 0.917 -> 0.888, so the direction is right.
 
 ## Decisions for the owner
 

@@ -44,7 +44,7 @@ already have.
 | `ptc.py` → 3.1× on text (2.606 bpb) | **verified** |
 | `llm_ptc` → 8.74× on alice29 (0.915 bpb) | **verified** — full-file sequential round-trip, 2026-08-03, at `LIMIT=8192` |
 | `llm_ptc` round-trip | **verified to 152,089 B**, one machine only — see below |
-| `llm_ptc` + SmolLM2-**360M** → 0.798 bpb on full alice29 | **measured, not decoded** — batched path, 2026-08-23. Sits exactly where 0.939 used to. |
+| `llm_ptc` + SmolLM2-**360M** → 0.798 bpb on full alice29 | **measured, not decoded** — batched path, 2026-08-23. Sits exactly where 0.939 used to. **−12.79% like-for-like** against the 135M batched baseline of 17,406 B, run 2026-08-31. |
 | `llm_ptc` → 1.270 bpb on full `book1`, vs ts_zip's published 1.431 | **measured, not decoded** — batched, 2026-08-23 |
 | enwik8 → 0.888 bpb on 1 MB, 0.917 on 262 KB | **measured, not decoded**. Full-file figures are **extrapolations**. |
 | lockstep window-slide at S>1 | **repaired 2026-08-31**, verified only at `LIMIT=128` on 4 KB — see below |

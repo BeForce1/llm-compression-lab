@@ -235,6 +235,14 @@
           "size": 17873,
           "limit": 1024,
           "why": "LIMIT=1024 was the default until the context sweep showed it was set from a GPT-2 ceiling. Same code, same model, same file - 473 bytes larger, 2.65%."
+        },
+        "batched_encode_LIMIT8192": {
+          "_about": "Run 2026-08-31 to close the like-for-like gap: the 360M row was being compared against the SEQUENTIAL 135M figure, which crosses encoding paths and is what this repo's own rule forbids. This is the missing cell - same model, same batched path, same LIMIT, same whole file.",
+          "bpb": 0.916,
+          "size": 17406,
+          "bytes_per_s": 781,
+          "gap_to_verified_sequential": "6 bytes, 0.034%. The equivalent comparison at LIMIT=1024 was 27 bytes / 0.15%, so the batched path became MORE faithful with more context, not less. It is still not decodable - fidelity as a measurement and decodability are separate properties, and only the second one is missing.",
+          "refutes": "NEXT_STEPS predicted this baseline would land near 0.934, from a 65,536 B sample. It landed at 0.916. bpb improves with file size (trap 2), so a small-sample baseline understates the model and would have made the 360M gain look 2 points larger than it is."
         }
       },
       "ts_zip (published)": {
@@ -564,6 +572,12 @@
       "detail": "Fastest-of-3, interleaved, at S=8 on 16,384 B: 4 threads 350 B/s, 6 288, 8 276, 12 269, 20 205. Monotonically decreasing, i.e. the SEQUENTIAL shape, so the shipped default of 6 sits near the top. The within-config spread (1.29-2.18x) exceeds the gap between 4, 6 and 8 (1.27x), so the top three are not separable at n=3 and nothing should be quoted among them.",
       "what_it_was_worth_anyway": "The plausible change - give lockstep every core, since compress_batched wants them - would have cost 1.71x. And recording output size per run is what surfaced the thread-count-is-part-of-the-format corruption, which was the real find. A sweep that refutes its own premise still paid for itself.",
       "lesson": "'A default is not a measurement' cuts both ways. Trap 9 says measure what you inherited; it does not say the inherited value is wrong. Two of the three costs here were noise, and the finding came from a column the sweep was not designed to look at."
+    },
+    {
+      "prediction": "the 135M batched baseline at LIMIT=8192 will land near 0.934, the figure already recorded for that configuration",
+      "outcome": "REFUTED - 0.916, because the recorded figure was a 65,536 B sample",
+      "detail": "bpb improves with file size, which is trap 2 in handoff.md, so a sample baseline understates the model it is a baseline for. Quoting 0.934 would have inflated the SmolLM2-360M gain from 12.8% to ~14.6%. The trap is normally cited for comparing two configs at different sizes; this is the same error with only one config, and it is easier to miss.",
+      "the_useful_half": "The batched path is 6 bytes / 0.034% from the verified sequential figure on the whole file at LIMIT=8192, against 27 bytes / 0.15% at LIMIT=1024. It got MORE faithful with more context. That makes it a sound measurement path and still not a codec - fidelity and decodability are separate properties and only the second is missing."
     }
   ],
   "why_not_just_a_faster_zip": {
@@ -820,8 +834,9 @@
       "size": 15179,
       "bytes_per_s": 409,
       "path": "batched",
-      "vs_135M_verified": "-12.8% against the 0.915 full-file sequential figure. That comparison crosses paths - batched vs sequential - which the repo's own rule forbids. The batched/sequential gap measured 0.15% on this file at LIMIT=1024, so the model effect dwarfs it, but the honest like-for-like baseline (135M batched, LIMIT=8192, full file) has never been run.",
-      "status": "This is now a MEASUREMENT, not the extrapolation NEXT_STEPS 2b warned about. It is still not a verified round-trip, so it does not replace the 0.915 headline."
+      "vs_135M_verified": "-12.76% against the 0.915 full-file sequential figure. RESOLVED 2026-08-31: this comparison crossed paths, and the like-for-like baseline has now been run. See vs_135M_like_for_like.",
+      "status": "This is now a MEASUREMENT, not the extrapolation NEXT_STEPS 2b warned about. It is still not a verified round-trip, so it does not replace the 0.915 headline.",
+      "vs_135M_like_for_like": "-12.79% against 135M batched at the same LIMIT on the same whole file (15,179 vs 17,406 B), measured 2026-08-31. The previously quoted -12.76% against the sequential figure was within 0.03 points of this, so the cross-path comparison was harmless - but it is now supported rather than assumed, which is the difference that matters."
     },
     "book1_135M": {
       "file": "corpus/book1",

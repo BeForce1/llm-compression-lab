@@ -26,7 +26,7 @@ Three caveats that are load-bearing, not throat-clearing:
 
 The honest summary is the one `handoff.md` already gives: **a well-measured reproduction,
 not a contribution.** What is genuinely worth keeping is the method and the negative
-results — fifteen refuted predictions with measurements, and instrument bugs caught by
+results — sixteen refuted predictions with measurements, and instrument bugs caught by
 sanity checks rather than luck.
 
 ---
@@ -173,10 +173,17 @@ would make it the headline is a full-file sequential encode **and** decode, same
 0.915 run — call it 7–10 h at 360M's slower rate, or a weekend at S=16 lockstep now that
 the slide path works.
 
-One caveat the run itself carries: 0.798 batched against 0.915 sequential crosses paths,
-which this repo's own rule forbids. The gap measured 0.15% on this file, so −13% is
-overwhelmingly the model — but the honest like-for-like baseline (135M, batched,
-`LIMIT=8192`, whole file) has never been run, and it is 20 minutes of compute.
+~~One caveat the run itself carries: 0.798 batched against 0.915 sequential crosses paths.~~
+**Closed 2026-08-31.** The like-for-like baseline is **17,406 B / 0.916 bpb** (135M,
+batched, `LIMIT=8192`, whole file, 781 B/s), so the model gain is **−12.79%** against the
+−12.76% previously quoted. The cross-path comparison was harmless — which is a measurement
+now, not an assumption.
+
+It also refuted its own prior: this file expected ~0.934, the figure already recorded for
+that configuration. That figure came from a **65,536 B sample**, and bpb improves with file
+size, so it would have inflated the 360M gain to ~14.6%. And the batched path measured
+**6 bytes / 0.034%** from the verified sequential figure, against 27 bytes / 0.15% at
+`LIMIT=1024` — more faithful with more context, and still not decodable.
 
 Price it honestly first: 360M is 2.7× the parameters, so it is slower than the 32 B/s that
 already put break-even at 481 days, and the model on disk grows from 272 MB to ~720 MB.

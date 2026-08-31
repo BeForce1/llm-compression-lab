@@ -19,7 +19,7 @@ lives in **[sql-compression](https://github.com/BeForce1/sql-compression)**.
 
 Everything below was measured by this code on a laptop CPU with no GPU. Figures quoted
 from other people's work are labelled as such. **The negative results are the most useful
-part of this repo** — fifteen predictions were refuted by measurement, and they are all in
+part of this repo** — sixteen predictions were refuted by measurement, and they are all in
 [§ What didn't work](#what-didnt-work).
 
 ---
@@ -48,10 +48,19 @@ file**, not an entropy measurement; what it cost to get there is the next sectio
 The 360M row above it is bolder and softer at once: **0.798 bpb / 15,179 B, 10.0× versus
 raw and 3.19× versus `xz -9`**, measured 2026-08-23 on the whole file at 409 B/s. It is a
 *batched* measurement, so it sits exactly where 0.939 used to — real, and not decodable.
-It is not the headline until it round-trips. Note also that it compares a batched run to a
-sequential one, which this repo's own rule forbids; the batched/sequential gap on this file
-measured 0.15%, so the model effect dwarfs it, but the like-for-like baseline (135M,
-batched, `LIMIT=8192`, full file) has never actually been run.
+It is not the headline until it round-trips.
+
+**The comparison behind that −13% is now supported rather than assumed.** It used to pit a
+batched run against a sequential one, which this repo's own rule forbids. The missing cell —
+135M, batched, `LIMIT=8192`, whole file — measures **17,406 B / 0.916 bpb**, so the
+like-for-like figure is **−12.79%** against the −12.76% previously quoted. The cross-path
+comparison was harmless, which nobody could have known without running it.
+
+Two things fell out of that run. The batched path is **6 bytes, 0.034%** from the verified
+sequential figure here, against 27 bytes / 0.15% at `LIMIT=1024` — it got *more* faithful
+with more context, not less. And the baseline this repo had on file for that configuration
+was **0.934**, from a 65,536 B sample; on the whole file it is 0.916. bpb improves with file
+size, so quoting the sample figure would have inflated the 360M gain to ~14.6%.
 
 ### What is *measured* versus what is *decodable*
 
@@ -370,6 +379,7 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | the lockstep window-slide works at S>1 — it's the same code the sequential path has run all along | **refuted, by reading rather than running** | It had never *executed* at S>1. Every lockstep test was 8–32 KB, where a segment never reaches `LIMIT`. The first run big enough to slide would have asked for **12.0 GiB** of logits at S=16. Fixed with `logits_to_keep=1`; 12.0 GiB → 3.0 MiB. |
 | that fix will change the format, since a different `lm_head` GEMM reduces floats in a different order | **half-refuted** | Streams measured **byte-identical** at S=1 and S=4 — but the logits underneath differ by ~4e-5 and ~7% of probability buckets move. One sample agreeing is not compatibility. Treat it as a format change. |
 | sweeping `LLM_PTC_THREADS` for lockstep will find another free multiple, as it did for sequential | **refuted — the inherited default was right** | 4 threads 350 B/s, 6 **288**, 8 276, 12 269, 20 205. The *sequential* shape, so the shipped 6 is near the top. The obvious change — give it every core, as `compress_batched` wants — would have cost **1.71×**. |
+| the 135M batched baseline will land near 0.934, the figure already on file for that config | **refuted** | 0.916. The recorded figure was a **65,536 B sample**, and bpb improves with file size — quoting it would have inflated the 360M gain from 12.8% to ~14.6%. Trap 2 with only one config, which is easier to miss than the two-config version. |
 | rewriting `ptc.py`'s hot loops (unrolled contexts, `__slots__`, inlined helpers) is worth 1.35× | **refuted by interleaving** | 1.35× run A-then-B, **1.00×** run A,B,A,B on an idle box. The first measurement was cache state. Reverted. |
 | the shipped defaults are the measured optimum, as the README said | **refuted** | `LLM_PTC_THREADS` was `os.cpu_count()` and had never been swept. It was the *slowest* of five settings — 42 B/s vs 87 at 6 threads, **2.07×** paid on every run in the project's life. |
 

@@ -243,7 +243,8 @@
           "bytes_per_s": 781,
           "gap_to_verified_sequential": "6 bytes, 0.034%. The equivalent comparison at LIMIT=1024 was 27 bytes / 0.15%, so the batched path became MORE faithful with more context, not less. It is still not decodable - fidelity as a measurement and decodability are separate properties, and only the second one is missing.",
           "refutes": "NEXT_STEPS predicted this baseline would land near 0.934, from a 65,536 B sample. It landed at 0.916. bpb improves with file size (trap 2), so a small-sample baseline understates the model and would have made the 360M gain look 2 points larger than it is."
-        }
+        },
+        "_charted_batched_row": "The batched figure is also shown in the README headline table now, because without it the 360M row invites exactly the cross-path comparison the 2026-08-31 baseline run was done to remove."
       },
       "ts_zip (published)": {
         "bpb": 1.142,

@@ -26,7 +26,7 @@ ts_zip shipped in 2023; our 17.7% margin over it is a *model-vintage artifact* (
 2024 model against their 2023 one), not an algorithmic advance. Nothing here is novel.
 
 **What is genuinely worth keeping** is the method and the negative results: a harness that
-reproduces published `xz` figures to three decimals, fourteen refuted predictions with
+reproduces published `xz` figures to three decimals, sixteen refuted predictions with
 measurements, and two instrument bugs caught by sanity checks rather than luck.
 
 **Effort-to-result is humbling and worth internalising before you plan work:** swapping the

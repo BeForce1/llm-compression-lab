@@ -34,6 +34,7 @@ On `alice29.txt` (152,089 bytes) — every codec on the identical file:
 |---|---:|---:|---:|
 | llm_ptc + SmolLM2-360M *— measured, not decoded* | 15,179 | 0.798 | −13% |
 | **llm_ptc + SmolLM2-135M** | **17,400** | **0.915** | — |
+| llm_ptc + SmolLM2-135M *— batched, the like-for-like baseline* | 17,406 | 0.916 | +0.03% |
 | ts_zip (RWKV-169M) *— published* | ~21,711 | 1.142 | +25% |
 | llm_ptc + GPT-2 124M | 34,868 | 1.834 | +100% |
 | `bz2 -9` | 43,202 | 2.272 | +148% |
@@ -393,6 +394,34 @@ cost-bucketing bug in `probe.py` that put the *start of the file* in the "post-s
 bucket (GPT-2 has Alice's opening lines memorised, which produced a nonsensical result),
 and the enwik8 header bias above. **A surprising measurement is more often a broken
 instrument than a discovery.**
+
+---
+
+## The thread count is part of the format
+
+Found on 2026-08-31 by a sweep that was looking for something else, and it is the sharpest
+failure mode this repo has produced.
+
+`compress_lockstep` output varies with `torch.get_num_threads()`: 16,384 B at S=4 encodes to
+**2,209 B at 4/6/8 threads and 2,210 B at 12/20**, consistently. Different size means
+different bytes, and cross-decoding them does not fail loudly — it returns **8,692 bytes for
+an 8,192-byte input** one way and 8,320 the other, with **no exception raised**. The token
+count in the header is correct, so the decoder runs to completion and hands back
+plausible-looking garbage.
+
+It was found because the sweep logged output size per run, which it had no reason to do.
+Nothing in the test suite would have caught it: every round-trip encodes and decodes in one
+process at one thread count, so the two sides always agreed.
+
+The thread count is a header byte now, restored at decode. It is self-healing rather than
+fail-loud because it can be — `set_num_threads` after the model loads does take effect here
+and reproduces a byte-identical stream — and it is still checked afterwards, because that is
+an OpenMP build detail rather than a promise.
+
+**The general lesson is the one in caveat 3 below, made concrete.** "Verified means this
+machine" was already written down. What that actually cashes out to is that *thread count*
+is as much a part of this format as the model weights are, and until today it was the only
+part not written into the stream.
 
 ---
 

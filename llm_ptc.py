@@ -522,6 +522,28 @@ class _LockPredictor:
         return torch.softmax(out.logits[:, -1].double(), -1).numpy()
 
 
+def _apply_threads(n):
+    """Restore the thread count the stream was written with.
+
+    A lockstep stream does not survive a different one. Measured 2026-08-31 on
+    8,192 B of alice29 at S=8: 1,208 B at 4/6/8 threads and 1,209 B at 12/20,
+    and cross-decoding those returned 8,320 and 8,692 bytes of garbage for an
+    8,192-byte input with NO exception raised. Silent corruption, on the path
+    the roadmap depends on.
+
+    Self-healing rather than fail-loud because it can be: set_num_threads after
+    the model is loaded does take effect here, and reproduces a byte-identical
+    stream. It is still checked, because that is an OpenMP build detail and not
+    a promise.
+    """
+    if n and torch.get_num_threads() != n:
+        torch.set_num_threads(n)
+        if torch.get_num_threads() != n:
+            raise RuntimeError(
+                f'this stream was written with {n} torch threads and the decoder '
+                f'has {torch.get_num_threads()}; set LLM_PTC_THREADS={n} before decoding')
+
+
 def _segments(n, S):
     """Start offset and length per segment, as equal as possible.
 
@@ -552,8 +574,10 @@ def _lockstep(data_or_blob, S=None, decode=False):
         blob = data_or_blob
         n = int.from_bytes(blob[:4], 'big') & ~LOCKSTEP_FLAG
         S = blob[4]
-        sizes = [int.from_bytes(blob[5 + 4 * i:9 + 4 * i], 'big') for i in range(S)]
-        off, coders = 5 + 4 * S, []
+        _apply_threads(blob[5])
+        sizes = [int.from_bytes(blob[6 + 4 * i:10 + 4 * i], 'big')
+                 for i in range(S)]
+        off, coders = 6 + 4 * S, []
         for sz in sizes:
             coders.append(ptc.Decoder(blob[off:off + sz]))
             off += sz
@@ -566,6 +590,7 @@ def _lockstep(data_or_blob, S=None, decode=False):
         return b''
     S = min(S, n)                                  # never more segments than tokens
     starts, lens = _segments(n, S)
+    nthreads = min(255, torch.get_num_threads())
     pred = _LockPredictor(S)
     banks = [MatchBank(ORDERS) if ORDERS else None for _ in range(S)]
     mixers = [Mixer(1 + len(ORDERS)) if ORDERS else None for _ in range(S)]
@@ -592,7 +617,7 @@ def _lockstep(data_or_blob, S=None, decode=False):
     if decode:
         return tok.decode(ids, clean_up_tokenization_spaces=False).encode('utf-8')
     blobs = [c.finish() for c in coders]
-    return ((LOCKSTEP_FLAG | n).to_bytes(4, 'big') + bytes([S])
+    return ((LOCKSTEP_FLAG | n).to_bytes(4, 'big') + bytes([S, nthreads])
             + b''.join(len(b).to_bytes(4, 'big') for b in blobs) + b''.join(blobs))
 
 

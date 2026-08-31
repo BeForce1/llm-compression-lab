@@ -26,7 +26,7 @@ Three caveats that are load-bearing, not throat-clearing:
 
 The honest summary is the one `handoff.md` already gives: **a well-measured reproduction,
 not a contribution.** What is genuinely worth keeping is the method and the negative
-results — fourteen refuted predictions with measurements, and instrument bugs caught by
+results — fifteen refuted predictions with measurements, and instrument bugs caught by
 sanity checks rather than luck.
 
 ---
@@ -69,17 +69,32 @@ codec speeds understated by 5–33×, all in the direction that flattered this r
 
 ## What to do next
 
-### 0. Sweep the thread count for lockstep — **~30 min** ⭐ do this before the long run
+### ~~0. Sweep the thread count for lockstep~~ — **DONE 2026-08-31.** Premise refuted; the sweep paid for itself anyway
 
-`compress_batched` explicitly overrides to all cores, with a measured comment saying why.
-`compress_lockstep` does not: it inherits `_load()`'s `min(6, cpu_count)`, which was swept
-for the **sequential** path. A `[S,1]` GEMM is neither shape — at S=16 it is sixteen times
-wider than the one the 6-thread optimum was measured on, and nobody has measured it.
+Fastest-of-3, interleaved, S=8 on 16,384 B:
 
-Trap 9 is exactly this: *a default is not a measurement*. The last time it was checked, an
-inherited default was worth 2.07× on every run the project had ever made, and it is now
-inherited on the path the whole roadmap depends on. Interleave the runs (trap 10) and take
-fastest-of-N.
+| threads | 4 | 6 | 8 | 12 | 20 |
+|---|---:|---:|---:|---:|---:|
+| lockstep encode | **350 B/s** | 288 | 276 | 269 | 205 |
+
+**Monotonically decreasing — the *sequential* shape, not the batched one.** So the
+inherited default of 6 was approximately right, and there was no 2.07×-style win here. The
+within-config spread (1.29–2.18×) is wider than the gap between 4, 6 and 8 (1.27×), so
+those three are **not separable** at n=3 and no optimum should be quoted among them.
+
+What it was worth: the plausible change — *lockstep batches a GEMM, so give it every core
+like `compress_batched` does* — would have been **1.71× slower**. Preventing that was the
+payoff, not a speedup.
+
+**And the column the sweep wasn't looking at was the real find.** Output size varied with
+thread count: 2,209 B at 4/6/8 and 2,210 at 12/20, consistently across all three passes.
+Cross-decoding those was **silent corruption** — a 12-thread blob read at 6 threads
+returned 8,692 bytes for an 8,192-byte input, with no exception raised. The thread count is
+a header byte now and `_apply_threads` restores it at decode; cross-decode verified in both
+directions.
+
+The instrument was validated before it was trusted: the sequential control reproduced the
+known 6-vs-20 result at 1.66× and 2.31×, bracketing the recorded 2.07×.
 
 ### ~~1. Sweep the context length~~ — **DONE 2026-08-03.** Worth −11.3%
 

@@ -19,7 +19,7 @@ lives in **[sql-compression](https://github.com/BeForce1/sql-compression)**.
 
 Everything below was measured by this code on a laptop CPU with no GPU. Figures quoted
 from other people's work are labelled as such. **The negative results are the most useful
-part of this repo** — fourteen predictions were refuted by measurement, and they are all in
+part of this repo** — fifteen predictions were refuted by measurement, and they are all in
 [§ What didn't work](#what-didnt-work).
 
 ---
@@ -369,6 +369,7 @@ Kept deliberately, because a repo that only reports its wins isn't a measurement
 | the first 256 KB of enwik8 is a representative sample | **refuted** | 0.811 there vs 0.917 mid-file. XML preamble, 13% bias. |
 | the lockstep window-slide works at S>1 — it's the same code the sequential path has run all along | **refuted, by reading rather than running** | It had never *executed* at S>1. Every lockstep test was 8–32 KB, where a segment never reaches `LIMIT`. The first run big enough to slide would have asked for **12.0 GiB** of logits at S=16. Fixed with `logits_to_keep=1`; 12.0 GiB → 3.0 MiB. |
 | that fix will change the format, since a different `lm_head` GEMM reduces floats in a different order | **half-refuted** | Streams measured **byte-identical** at S=1 and S=4 — but the logits underneath differ by ~4e-5 and ~7% of probability buckets move. One sample agreeing is not compatibility. Treat it as a format change. |
+| sweeping `LLM_PTC_THREADS` for lockstep will find another free multiple, as it did for sequential | **refuted — the inherited default was right** | 4 threads 350 B/s, 6 **288**, 8 276, 12 269, 20 205. The *sequential* shape, so the shipped 6 is near the top. The obvious change — give it every core, as `compress_batched` wants — would have cost **1.71×**. |
 | rewriting `ptc.py`'s hot loops (unrolled contexts, `__slots__`, inlined helpers) is worth 1.35× | **refuted by interleaving** | 1.35× run A-then-B, **1.00×** run A,B,A,B on an idle box. The first measurement was cache state. Reverted. |
 | the shipped defaults are the measured optimum, as the README said | **refuted** | `LLM_PTC_THREADS` was `os.cpu_count()` and had never been swept. It was the *slowest* of five settings — 42 B/s vs 87 at 6 threads, **2.07×** paid on every run in the project's life. |
 

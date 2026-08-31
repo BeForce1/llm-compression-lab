@@ -557,6 +557,13 @@
       "outcome": "REFUTED - the confound was genre",
       "detail": "Holding genre constant with a 2026 news corpus, the cost of never having seen the text is -0.8% to +5.7% across three models. The 25-30% cliff sits entirely on the narrative->technical axis. Normalised against xz, all three models score BETTER on the unseen file than the memorised one. Genre is only roughly controlled - Victorian fiction vs 2026 journalism is two narrative genres - and post-cutoff fiction under a redistributable licence is the honest gap.",
       "where": "contamination_test, model_comparison_2026_08_03"
+    },
+    {
+      "prediction": "sweeping LLM_PTC_THREADS for lockstep will find another free multiple, the way the sequential sweep found 2.07x - the default was inherited, never measured, and a [S,1] GEMM is a different shape from the [1,1] the 6-thread optimum was measured on",
+      "outcome": "REFUTED - the inherited default was approximately right",
+      "detail": "Fastest-of-3, interleaved, at S=8 on 16,384 B: 4 threads 350 B/s, 6 288, 8 276, 12 269, 20 205. Monotonically decreasing, i.e. the SEQUENTIAL shape, so the shipped default of 6 sits near the top. The within-config spread (1.29-2.18x) exceeds the gap between 4, 6 and 8 (1.27x), so the top three are not separable at n=3 and nothing should be quoted among them.",
+      "what_it_was_worth_anyway": "The plausible change - give lockstep every core, since compress_batched wants them - would have cost 1.71x. And recording output size per run is what surfaced the thread-count-is-part-of-the-format corruption, which was the real find. A sweep that refutes its own premise still paid for itself.",
+      "lesson": "'A default is not a measurement' cuts both ways. Trap 9 says measure what you inherited; it does not say the inherited value is wrong. Two of the three costs here were noise, and the finding came from a column the sweep was not designed to look at."
     }
   ],
   "why_not_just_a_faster_zip": {
@@ -602,7 +609,27 @@
     },
     "why": "A single-token step is ~210 tiny GEMVs, one parallel region each, and the work is memory-bandwidth-bound - so past ~6 threads you buy fork-join barriers and hyperthread contention, not throughput. One forward per WINDOW is instead a big GEMM that parallelises properly, so the batched path has the OPPOSITE optimum. Both defaults are now set per-path.",
     "gain": "2.07x on the sequential codec (42 -> 87 B/s), which is both encode AND decode. One-line change.",
-    "format_risk": "Sequential output was byte-identical at 3 KB across 6 and 20 threads and cross-decoded in both directions, and the 4 KB round-trip is byte-identical to the pre-change run (515 B). But the BATCHED path at 16 KB does vary with thread count (1,990 B at 6/12 vs 1,992 B at 8/20), so reduction order is observable in general. Safe for the sizes tested; re-verify before a long run."
+    "format_risk": "Sequential output was byte-identical at 3 KB across 6 and 20 threads and cross-decoded in both directions, and the 4 KB round-trip is byte-identical to the pre-change run (515 B). But the BATCHED path at 16 KB does vary with thread count (1,990 B at 6/12 vs 1,992 B at 8/20), so reduction order is observable in general. Safe for the sizes tested; re-verify before a long run.",
+    "lockstep_encode_B_per_s_S8": {
+      "_about": "Swept 2026-08-31 on 16,384 B of alice29 at S=8, LIMIT=8192. INTERLEAVED (4,6,8,12,20 in order, three passes) rather than back-to-back, because trap 10 says A-then-B measures cache state - the sequential sweep above predates that trap and was run back-to-back. Fastest of three. Instrument validated first against the known sequential result: 6 threads beat 20 by 1.66x and 2.31x on the control runs, bracketing the recorded 2.07x.",
+      "fastest_of_3": {
+        "4": 350,
+        "6": 288,
+        "8": 276,
+        "12": 269,
+        "20": 205
+      },
+      "within_config_spread": {
+        "4": "2.18x",
+        "6": "1.89x",
+        "8": "1.49x",
+        "12": "1.49x",
+        "20": "1.29x"
+      },
+      "finding": "The lockstep path has the SEQUENTIAL optimum, not the batched one - monotonically decreasing in thread count, 4 > 6 > 8 > 12 > 20. The inherited default of 6 was therefore approximately RIGHT, which is the opposite of what the sweep was run to find.",
+      "what_it_is_not": "A 2.07x-style free win. The within-config spread (1.29-2.18x) is larger than the gap between 4, 6 and 8 (1.27x), so the top three are NOT separable at n=3 and no optimum should be quoted among them. Only the endpoint separates: 20 threads is 1.71x worse than 4, and 20's best run (205 B/s) is below 4's MEDIAN (339).",
+      "the_value_is_the_negative": "The obvious change - 'lockstep batches a GEMM, so give it every core like compress_batched does' - would have been 1.71x SLOWER. The sweep's payoff was preventing that, not finding a speedup."
+    }
   },
   "lockstep_decode_pilot": {
     "_about": "Prototype for Long_Time_Tests 4.6, 2026-07-31: S independent segment streams advanced one token per step in a single [S,1] forward, each with its own KV cache, match bank, mixer and coder. Encoder and decoder run the SAME step-major loop, so both execute identical batched GEMMs in identical order - unlike compress_batched, which encoded [1,W] and decoded [1,1] and diverged at byte 253. Scratch prototype, not in the repo.",
@@ -760,6 +787,25 @@
         }
       ],
       "penalty_decay": "Same S, 4x the segment length: S=4 9.08% -> 3.97% (2.29x), S=8 19.25% -> 7.61% (2.53x), S=16 37.41% -> 13.52% (2.77x). Three S values now agree that the cost tracks segment length, which is a curve rather than the single direction size_dependence had."
+    },
+    "thread_count_is_part_of_the_format": {
+      "_about": "Found by the 2026-08-31 thread sweep, which recorded output size per run. It is a bigger result than the sweep it fell out of.",
+      "observation": "16,384 B at S=8 encodes to 2,209 B at 4, 6 and 8 threads and 2,210 B at 12 and 20 - consistent across all three passes. Different size means different bytes.",
+      "cross_decode_before_the_fix": "Silent corruption, not an error. A blob written at 12 threads and read at 6 returned 8,692 bytes for an 8,192-byte input; written at 6 and read at 12 returned 8,320. No exception was raised in either direction - the token COUNT in the header is right, so the decoder runs to completion and hands back plausible-looking garbage.",
+      "fix": "The thread count is now a header byte, and _apply_threads restores it at decode. Self-healing rather than fail-loud because it can be: torch.set_num_threads AFTER the model is loaded does take effect here and reproduces a byte-identical stream (verified against a true 12-thread blob). It is still checked afterwards, since that is an OpenMP build detail rather than a promise, and raises with the exact LLM_PTC_THREADS value to set if it did not apply.",
+      "verified": "Cross-decode ok in both directions after the fix (6->20 and 20->6). Round-trip ok at S=1,2,4,8,16 on 4,096 B, and the sequential path is still 515 B, unchanged.",
+      "format": "Header is now n(4) | S(1) | threads(1) | segment sizes(4 x S) | blobs. Second format change today, after logits_to_keep - both are recorded and neither is backward compatible.",
+      "not_extended_to_the_sequential_path": "Deliberate. results.json already records sequential output as byte-identical across 6 and 20 threads at 3 KB, cross-decoding both ways. That is 'safe for the sizes tested', not proven - but it is measured, and this change is scoped to the path where corruption was actually observed."
+    },
+    "memory_ceiling": {
+      "_about": "Computed 2026-08-31 from the model config (30 layers, 3 KV heads, head_dim 64, float32).",
+      "kv_bytes_per_token": 46080,
+      "at_LIMIT_8192": {
+        "S=4": "1.41 GiB steady + 0.70 transient = ~2.1 peak",
+        "S=8": "2.81 GiB steady + 1.41 transient = ~4.2 peak",
+        "S=16": "5.62 GiB steady + 2.81 transient = ~8.4 peak"
+      },
+      "consequence": "S=16 does not fit. This box is 15.7 GB with ~2.4 GB typically free, so the practical setting for any run long enough to slide is S=8 - 9.36x decode instead of 14.11x. The logits_to_keep fix removed a separate 12.0 GiB allocation on the same code path; it was necessary, not sufficient."
     }
   },
   "model_comparison_2026_08_23": {

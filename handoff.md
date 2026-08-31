@@ -253,16 +253,19 @@ All in `results/results.json` with numbers; the short version:
 
 `Long_Time_Tests.md` has everything costed and ordered. In order:
 
-1. **Sweep `LLM_PTC_THREADS` for the lockstep path** — 30 minutes, and trap 9 verbatim.
-   `compress_batched` overrides to all cores with a measured comment saying why;
-   `compress_lockstep` silently inherits the *sequential* optimum of 6. A `[16,1]` GEMM is
-   neither shape. The last inherited default cost 2.07× on every run this project made.
-2. **`enwik8_1m` at S=16** — about an hour, and the only test that turns "the lockstep
-   penalty approaches zero on big files" from a prediction into a measurement. 20,057-token
-   segments, so it is also the first run where a segment exceeds `LIMIT` and the repaired
-   slide path runs at scale. Do it before committing a weekend.
-3. **Full-`enwik8` verified round-trip at S=16** — about a weekend, unblocked, and no
-   longer waiting on int8.
+1. ~~Sweep `LLM_PTC_THREADS` for lockstep~~ — **done 2026-08-31**. Premise refuted: the
+   path has the *sequential* optimum, so the inherited 6 was right and there was no free
+   multiple. It paid for itself twice anyway — giving it every core (the obvious change)
+   would have cost 1.71×, and logging output size per run is what caught the thread count
+   being part of the format.
+2. **`enwik8_1m` at S=8** — a few hours, and the only test that turns "the lockstep penalty
+   approaches zero on big files" from a prediction into a measurement. At S=8 that is
+   ~40,000-token segments, so it is also the first run where a segment exceeds `LIMIT` and
+   the repaired slide path runs at scale. Do it before committing a weekend.
+3. **Full-`enwik8` verified round-trip at S=8** — about a weekend, unblocked, and no
+   longer waiting on int8. **Not S=16:** the KV cache is 46,080 B/token, so S=16 at
+   `LIMIT=8192` is 5.62 GiB steady plus 2.81 transient during a slide — ~8.4 GiB peak on a
+   box with ~2.4 GB typically free. S=8 is ~4.2 GiB peak and 9.36× decode instead of 14.11×.
 4. **Deterministic int8 inference** (item 4.1) — still the only path from "measurement demo"
    to "working codec" and cross-machine decompression, but no longer the blocker for any
    run on this list.

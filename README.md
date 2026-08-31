@@ -189,9 +189,10 @@ Both hypotheses offered for "why bigger lost" were testable, and one of them was
 | big vocabulary wastes capacity | still untested; needs `gemma-3-270m`, which is a gated repo |
 
 For scale, and this is the finding rather than a disclaimer: **swapping the model was worth
-45%; a bigger sibling is worth another 13%; using the base rather than instruct checkpoint
+45%; a bigger sibling is worth another 12.8%; using the base rather than instruct checkpoint
 is worth 15%. Every hand-built modelling improvement in this repo, combined, is worth about
-1%.** The full fair-context matrix is in
+1%.** The 12.8% is now a whole-file, like-for-like figure — 360M against 135M on the same
+batched path at the same `LIMIT` — rather than the 65 KB sample it used to rest on. The full fair-context matrix is in
 [`results.json`](results/results.json) under `model_comparison_2026_08_03`.
 
 ---
@@ -539,11 +540,24 @@ clock, and the order to do them in. The short version:
   the same person twice.
 - ~~**~1 hour** checks the enwik8 trend before committing to the long run~~ — **done
   2026-08-23**: 0.917 at 262 KB → **0.888 at 1 MB**. The trend goes the right way.
+- ~~**~30 min** sweeps the lockstep thread count~~ — **done 2026-08-31, premise refuted.**
+  The path has the *sequential* optimum (4: 350 B/s, 6: 288, 8: 276, 12: 269, 20: 205), so
+  the inherited default of 6 was right and there was no free multiple. It paid for itself
+  anyway: the obvious change — give it every core, as the batched path wants — would have
+  cost 1.71×, and logging output size per run is what caught the thread count being part of
+  the format.
+- ~~**~20 min** measures the like-for-like 135M baseline~~ — **done 2026-08-31.** 17,406 B /
+  0.916 bpb, so 360M's gain is **−12.79%** against the −12.76% previously quoted. It also
+  refuted the 0.934 figure that had been standing in for that baseline: 0.934 came from a
+  65,536 B sample, and bpb improves with file size, so quoting it would have inflated the
+  360M gain to ~14.6%.
 - **~26 hours** turns the ts_zip enwik8 comparison from an extrapolation into a measurement.
 - ~~**~17 days** for a verified full-enwik8 round-trip~~ — lockstep decode cut that to about
-  a weekend, and it needs no int8. But the slide path it depends on had never executed at
-  S>1 and would have asked for 12 GiB of logits; that is fixed, and the fix is verified only
-  at `LIMIT=128` on 4 KB so far.
+  a weekend, and it needs no int8. Two things sit in front of it. The slide path it depends
+  on had never executed at S>1 and would have asked for **12 GiB** of logits; that is fixed,
+  and verified so far only at `LIMIT=128` on 4 KB. And **S=16 does not fit in memory** — the
+  KV cache is 46,080 B/token, so S=16 at `LIMIT=8192` peaks near 8.4 GiB on a box with
+  ~2.4 GB typically free. S=8 is the practical setting, at 9.36× decode rather than 14.11×.
 
 ## Files
 
@@ -555,6 +569,7 @@ clock, and the order to do them in. The short version:
 | `probe.py` | diagnostics: coder overhead, quantisation effect, context sweep. |
 | `huffman.py` | order-0 Huffman, for reference. Loses to everything; kept to show why. |
 | `results/results.json` | every number in this README. |
+| `RANK_1/2/3_REPORT.md` | benchmark write-ups from 2026-08-23. Their numbers now live in `results.json`; kept because a blanket `*.md` ignore had hidden them for a week. |
 | `scripts/fetch_corpus.py` | fetches and verifies all corpora. Nothing is redistributed. |
 | `handoff.md` | orientation, traps, hard rules, and open decisions. Read first. |
 | `Long_Time_Tests.md` | the multi-hour work not yet done, costed and ordered. |

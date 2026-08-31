@@ -1,7 +1,7 @@
 ﻿# Rank 2 Benchmark Report: `enwik8` Multi-Megabyte Scaling & Trend Analysis
 
 **Date:** 2026-08-23  
-**Repo:** [llm-compression-lab](file:///C:/Users/aregm/personal/llm-compression-lab)  
+**Repo:** llm-compression-lab  
 **Environment:** Windows 11, Intel CPU (20 logical cores, no AVX-512), Python 3.13, PyTorch 2.11, float32, CPU-only inference.
 
 ---

@@ -3,7 +3,6 @@
 For whoever picks this up next, including future-me. Read this before running anything.
 
 **Repo:** `github.com/BeForce1/llm-compression-lab` (private)
-**Working copy:** `C:\Users\aregm\personal\llm-compression-lab`
 **Started:** 2026-07-30. **This doc:** 2026-07-31, last reconciled 2026-08-31.
 
 ---
@@ -57,8 +56,8 @@ single-token GEMMs reduce floats in a different order). Keep it for measurement,
 
 ## The verification landed
 
-Done, 2026-07-31: a full sequential encode **and decode** of `alice29.txt` (task
-`bzdrzq9j0`, pid 5428, ~3 hours) returned `round-trip: ok` at **0.940 bpb / 17,873 B**.
+Done, 2026-07-31: a full sequential encode **and decode** of `alice29.txt` (~3 hours)
+returned `round-trip: ok` at **0.940 bpb / 17,873 B**.
 The README headline, charts and `results/results.json` were updated to the verified figure
 and item **D.4** is closed.
 
@@ -76,7 +75,7 @@ Three things to carry forward:
 
 The context sweep moved the default `LIMIT` from 1024 to 8192, so the headline had to be
 re-earned at the shipped defaults. Full sequential encode **and** decode of `alice29.txt`,
-pid 19296, ~5.5 hours: `round-trip: ok`. **473 bytes smaller, 2.65%, from one changed
+~5.5 hours: `round-trip: ok`. **473 bytes smaller, 2.65%, from one changed
 constant.** 8.74× vs raw, 2.79× vs `xz -9`, 19.9% under ts_zip.
 
 - **Throughput, finally clean: 32 B/s encode, 34 B/s decode.** Idle box, whole file. These
@@ -185,8 +184,8 @@ These all cost me real time. They are the most valuable part of this document.
 
 ## Hard rules for this repo
 
-- **No Claude co-author in commits.** Owner's explicit requirement. No `Co-Authored-By`
-  trailer, no "Generated with" line. Audited clean across all history.
+- **Commits carry one author.** No `Co-Authored-By` trailers and no "Generated with"
+  lines, whatever wrote the patch. Audited clean across all history, every blob included.
 - **Commits must use the GitHub noreply email.** The account blocks pushes exposing its
   real address. `user.email` is set **locally in this repo** to
   `80689854+BeForce1@users.noreply.github.com`. Global git config is untouched — don't
@@ -279,9 +278,17 @@ that used to be the gate is done: 0.917 -> 0.888, so the direction is right.
 ## Decisions for the owner
 
 - **Publish public?** The repo is private. It's above-average as a portfolio piece
-  *specifically because* it leads with refuted predictions. If it goes public, the
-  `ff4501d` orphan commit is unreachable but may survive GitHub GC — delete-and-recreate is
-  the belt-and-braces option.
+  *specifically because* it leads with refuted predictions.
+
+  **There is a hard prerequisite, and it is no longer hypothetical.** An early commit that
+  included `corpus/post2026.txt` was purged from the branch but still exists on the remote
+  as an unreachable object — and it is still *served*: the whole file comes back through the
+  commits API at that ref. That is someone else's text under their own licence, carrying
+  their contact details, sitting in an MIT repo. Going public exposes it. GitHub does not
+  garbage-collect on request and a force-push does not remove it, so **delete-and-recreate
+  the remote is the fix, not a precaution.** Do it before flipping visibility. The SHA is
+  deliberately not recorded here — this file would be public too, and it would be the
+  signpost. `git fsck --lost-found` and the commits API will find it when you need it.
 - **Spend 26 hours on full enwik8?** It makes the ts_zip comparison a measurement rather
   than an extrapolation, but that comparison is a model-vintage artifact either way. Low
   value for the cost.
